@@ -1,0 +1,60 @@
+name: Close pull requests
+
+# WHY THIS WORKFLOW EXISTS
+# ========================
+# GitHub has no switch to turn pull requests off, and this repository's LICENSE
+# states that they are not accepted. The reason is copyright, not unfriendliness:
+# every commit here is an automated snapshot of a private codebase, and merging a
+# contribution would put third-party copyright inside it with no CLA to cover it.
+#
+# Leaving PRs open to sit unanswered would be worse than closing them -- someone
+# would have spent real effort on a branch that can never merge. So they are closed
+# immediately, with an explanation and somewhere useful to send the work.
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = [
+              "Thanks for taking the time to look at this code closely enough to write a patch.",
+              "",
+              "This repository cannot accept pull requests. Every commit here is an automated",
+              "snapshot of a private codebase published so that anyone can verify what the",
+              "launcher does on their machine -- merging into it would split the copyright in a",
+              "codebase that has to stay undivided, and the next release snapshot would",
+              "overwrite the change regardless.",
+              "",
+              "Your work is still wanted, just through a different door:",
+              "",
+              "- **Found a bug or a security issue?** Open an issue, or email admin@dayzbeanslauncher.com.",
+              "  Security reports are answered within 72 hours and credited in the release notes.",
+              "- **Have a fix in mind?** Describe it in an issue and it can be applied upstream,",
+              "  with credit. Feel free to paste the diff there.",
+              "",
+              "Sorry to close this automatically rather than by hand -- an unanswered PR sitting",
+              "open for months would be the worse outcome.",
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              state: 'closed',
+            });

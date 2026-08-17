@@ -1,0 +1,65 @@
+{
+  "appId": "com.dayzbeanlauncher.app",
+  "productName": "Day(Z) Beans Launcher",
+  "directories": {
+    "output": "release",
+    "buildResources": "build"
+  },
+  "files": [
+    "dist-electron/**/*",
+    "dist-angular/dayz-launcher/browser/**/*",
+    "package.json",
+    "!src/**/*",
+    "!**/*.ts",
+    "!**/*.map",
+    "!**/tsconfig.json",
+    "!**/.eslintrc.json"
+  ],
+  "extraResources": [
+    {
+      "from": "src/assets",
+      "to": "assets",
+      "filter": ["**/*"]
+    }
+  ],
+  "asar": true,
+  "asarUnpack": [
+    "**/*.node"
+  ],
+  "win": {
+    "target": ["nsis", "portable"],
+    "icon": "build/icon.ico",
+    "signtoolOptions": {
+      "sign": "./scripts/sign-windows.js",
+      "signingHashAlgorithms": ["sha256"]
+    }
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "installerIcon": "build/icon.ico",
+    "uninstallerIcon": "build/icon.ico"
+  },
+  "mac": {
+    "icon": "build/icon.icns",
+    "target": ["dmg"]
+  },
+  "linux": {
+    "icon": "build/icon.png",
+    "target": ["AppImage", "deb", "tar.gz"],
+    "category": "Game",
+    "synopsis": "DayZ Server Browser and Mod Manager",
+    "description": "A modern launcher for DayZ with server browsing, mod management, and one-click join functionality.",
+    "desktop": {
+      "entry": {
+        "StartupWMClass": "dayz-beans-launcher"
+      }
+    }
+  },
+  "deb": {
+    "depends": ["libgtk-3-0", "libnotify4", "libnss3", "libxss1", "libxtst6", "xdg-utils", "libatspi2.0-0", "libuuid1", "libsecret-1-0"]
+  }
+}

@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Day(Z) Beans Launcher - Loading...</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #000 url('loading_logo.png') center center no-repeat;
+            background-size: cover;
+            height: 100vh;
+            display: flex;
+            justify-content: flex-end;
+            align-items: stretch;
+            flex-direction: column;
+            font-family: 'Rajdhani', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+            position: relative;
+        }
+
+        body::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: repeating-linear-gradient(
+                0deg,
+                rgba(0, 0, 0, 0.1),
+                rgba(0, 0, 0, 0.1) 1px,
+                transparent 1px,
+                transparent 2px
+            );
+            pointer-events: none;
+            z-index: 1;
+        }
+
+        .loader-container {
+            background: rgba(0, 0, 0, 0.85);
+            border-top: 3px solid rgba(212, 175, 55, 0.6);
+            padding: 30px 60px;
+            position: relative;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.8);
+        }
+
+        .loading-header {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            width: 100%;
+            max-width: 800px;
+        }
+
+        .loader {
+            width: 32px;
+            height: 32px;
+            border: 3px solid rgba(255, 255, 255, 0.15);
+            border-top: 3px solid #d4af37;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            flex-shrink: 0;
+        }
+
+        .loading-text {
+            font-size: 14px;
+            color: #ccc;
+            font-weight: 400;
+            letter-spacing: 0.5px;
+            text-align: left;
+            flex: 1;
+            line-height: 1.6;
+        }
+
+        .countdown {
+            font-size: 18px;
+            color: #d4af37;
+            font-weight: 600;
+            margin-left: auto;
+            min-width: 60px;
+            text-align: right;
+            text-shadow: 0 0 10px rgba(212, 175, 55, 0.5);
+        }
+
+        .loading-tips {
+            font-size: 12px;
+            color: #888;
+            text-align: center;
+            max-width: 800px;
+            line-height: 1.8;
+            font-style: italic;
+        }
+
+
+        /* ========== Spotlight Mode ========== */
+        .spotlight-container {
+            display: none;
+            text-align: center;
+            color: white;
+            width: 100%;
+            height: 100%;
+            position: relative;
+        }
+
+        .spotlight-container.active {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .spotlight-container.active ~ .loader-container {
+            display: none;
+        }
+
+        .spotlight-banner {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            background-size: cover;
+            background-position: center;
+            filter: brightness(0.4);
+        }
+
+        .spotlight-content {
+            position: relative;
+            z-index: 2;
+            max-width: 600px;
+            padding: 20px;
+        }
+
+        .spotlight-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            background: rgba(218, 165, 32, 0.9);
+            color: #000;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            border-radius: 3px;
+            margin-bottom: 16px;
+        }
+
+        .spotlight-name {
+            font-size: 32px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+            line-height: 1.2;
+        }
+
+        .spotlight-catchphrase {
+            font-size: 16px;
+            opacity: 0.9;
+            margin-bottom: 12px;
+            font-style: italic;
+            text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+        }
+
+        .spotlight-meta {
+            font-size: 13px;
+            opacity: 0.7;
+            margin-bottom: 20px;
+        }
+
+        .spotlight-meta span {
+            margin: 0 8px;
+        }
+
+        .spotlight-join-btn {
+            display: inline-block;
+            padding: 10px 28px;
+            background: linear-gradient(135deg, #DAA520, #B8860B);
+            color: #000;
+            font-size: 14px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+            box-shadow: 0 4px 12px rgba(218, 165, 32, 0.4);
+        }
+
+        .spotlight-join-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(218, 165, 32, 0.6);
+        }
+
+        .spotlight-hint {
+            font-size: 12px;
+            opacity: 0.5;
+            margin-top: 16px;
+            font-style: italic;
+        }
+
+        .spotlight-loading {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 2;
+            background: rgba(0, 0, 0, 0.85);
+            border-top: 2px solid rgba(212, 175, 55, 0.4);
+            padding: 16px 40px 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.6);
+        }
+
+        .spotlight-loading-header {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            width: 100%;
+            max-width: 700px;
+        }
+
+        .spotlight-loading .mini-spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(255,255,255,0.15);
+            border-top: 2px solid #DAA520;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            flex-shrink: 0;
+        }
+
+        .spotlight-loading-text {
+            font-size: 13px;
+            color: #ccc;
+            flex: 1;
+            letter-spacing: 0.3px;
+            transition: opacity 0.3s ease;
+        }
+
+        .spotlight-countdown {
+            font-size: 16px;
+            color: #d4af37;
+            font-weight: 600;
+            min-width: 24px;
+            text-align: right;
+            text-shadow: 0 0 8px rgba(212, 175, 55, 0.4);
+            font-family: 'Rajdhani', monospace;
+        }
+
+        .spotlight-progress-track {
+            width: 100%;
+            max-width: 700px;
+            height: 3px;
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .spotlight-progress-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #B8860B, #DAA520, #FFD700);
+            border-radius: 2px;
+            transition: width 0.3s linear;
+            box-shadow: 0 0 6px rgba(218, 165, 32, 0.5);
+        }
+
+        .spotlight-quote {
+            font-size: 13px;
+            color: #d4af37;
+            font-style: italic;
+            text-align: center;
+            max-width: 700px;
+            transition: opacity 0.3s ease;
+            min-height: 18px;
+            text-shadow: 0 0 8px rgba(212, 175, 55, 0.3);
+            letter-spacing: 0.3px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @keyframes flicker {
+            0%, 100% { 
+                opacity: 1;
+                filter: brightness(1);
+            }
+            5% { 
+                opacity: 0.9;
+                filter: brightness(0.95);
+            }
+            10% { 
+                opacity: 1;
+                filter: brightness(1);
+            }
+            15% { 
+                opacity: 0.85;
+                filter: brightness(0.9);
+            }
+            20% { 
+                opacity: 1;
+                filter: brightness(1);
+            }
+            50% { 
+                opacity: 0.95;
+                filter: brightness(0.98);
+            }
+        }
+
+        @keyframes textGlitch {
+            0%, 90%, 100% { 
+                text-shadow: 
+                    0 0 10px rgba(212, 175, 55, 0.8),
+                    0 0 20px rgba(212, 175, 55, 0.5),
+                    2px 2px 8px rgba(0,0,0,0.9);
+            }
+            91% { 
+                text-shadow: 
+                    2px 0 10px rgba(212, 175, 55, 0.8),
+                    -2px 0 20px rgba(212, 175, 55, 0.5),
+                    2px 2px 8px rgba(0,0,0,0.9);
+                transform: translateX(2px);
+            }
+            92% { 
+                text-shadow: 
+                    -2px 0 10px rgba(212, 175, 55, 0.8),
+                    2px 0 20px rgba(212, 175, 55, 0.5),
+                    2px 2px 8px rgba(0,0,0,0.9);
+                transform: translateX(-2px);
+            }
+            93% { 
+                text-shadow: 
+                    0 0 10px rgba(212, 175, 55, 0.8),
+                    0 0 20px rgba(212, 175, 55, 0.5),
+                    2px 2px 8px rgba(0,0,0,0.9);
+                transform: translateX(0);
+            }
+        }
+
+        @keyframes shimmer {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(200%); }
+        }
+
+        .loading-tips {
+            transition: opacity 0.3s ease-in-out;
+        }
+
+        @keyframes fade {
+            0%, 100% { opacity: 0.7; }
+            50% { opacity: 1; }
+        }
+
+        @keyframes progress {
+            0% { width: 0%; }
+            50% { width: 70%; }
+            100% { width: 100%; }
+        }
+
+        .particles {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            pointer-events: none;
+            z-index: 1;
+        }
+
+        .particle {
+            position: absolute;
+            width: 2px;
+            height: 2px;
+            background: rgba(150, 150, 150, 0.4);
+            border-radius: 50%;
+            animation: float 8s infinite linear;
+            box-shadow: 0 0 2px rgba(150, 150, 150, 0.3);
+        }
+
+        .particle:nth-child(3n) {
+            width: 3px;
+            height: 3px;
+            background: rgba(212, 175, 55, 0.2);
+            animation-duration: 10s;
+        }
+
+        .particle:nth-child(5n) {
+            width: 1px;
+            height: 4px;
+            background: rgba(100, 100, 100, 0.3);
+            border-radius: 0;
+            animation-duration: 12s;
+        }
+
+        @keyframes float {
+            0% {
+                transform: translateY(100vh) rotate(0deg);
+                opacity: 0;
+            }
+            10% {
+                opacity: 1;
+            }
+            90% {
+                opacity: 1;
+            }
+            100% {
+                transform: translateY(-100vh) rotate(360deg);
+                opacity: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="particles" id="particles"></div>
+
+    <!-- Spotlight Mode (hidden by default, activated via JS) -->
+    <div class="spotlight-container" id="spotlightContainer">
+        <div class="spotlight-banner" id="spotlightBanner"></div>
+        <div class="spotlight-content">
+            <div class="spotlight-badge">&#9733; Featured Server</div>
+            <div class="spotlight-name" id="spotlightName"></div>
+            <div class="spotlight-catchphrase" id="spotlightCatchphrase"></div>
+            <div class="spotlight-meta">
+                <span id="spotlightPlayers"></span>
+                <span>&#8226;</span>
+                <span id="spotlightMap"></span>
+                <span id="spotlightModsSep" style="display:none">&#8226;</span>
+                <span id="spotlightMods" style="display:none"></span>
+            </div>
+            <button class="spotlight-join-btn" id="spotlightJoinBtn" onclick="requestJoin()">PLAY THIS SERVER</button>
+            <div class="spotlight-hint">This server will be highlighted when the launcher opens</div>
+        </div>
+        <div class="spotlight-loading">
+            <div class="spotlight-loading-header">
+                <div class="mini-spinner"></div>
+                <span class="spotlight-loading-text">Loading Day(Z) Beans Launcher...</span>
+                <span class="spotlight-countdown" id="spotlightCountdown">6</span>
+            </div>
+            <div class="spotlight-progress-track">
+                <div class="spotlight-progress-bar" id="spotlightProgressBar"></div>
+            </div>
+            <div class="spotlight-quote" id="spotlightQuote"></div>
+        </div>
+    </div>
+
+    <!-- Default Mode -->
+    <div class="loader-container" id="defaultLoader">
+        <div class="loading-header">
+            <div class="loader"></div>
+            <p class="loading-text">Initializing Day(Z) Beans Launcher...</p>
+            <div class="countdown" id="countdown">5</div>
+        </div>
+        <p class="loading-tips" id="loadingTips">Tip: Use the server browser to find your perfect DayZ experience</p>
+    </div>
+
+    <script>
+        // Create floating particles
+        function createParticles() {
+            const particlesContainer = document.getElementById('particles');
+            const particleCount = 40;
+
+            for (let i = 0; i < particleCount; i++) {
+                const particle = document.createElement('div');
+                particle.className = 'particle';
+                particle.style.left = Math.random() * 100 + '%';
+                particle.style.animationDelay = Math.random() * 6 + 's';
+                particle.style.animationDuration = (6 + Math.random() * 4) + 's';
+                particlesContainer.appendChild(particle);
+            }
+        }
+
+        createParticles();
+
+        // Default mode countdown (5s)
+        let timeLeft = 5;
+        const countdownElement = document.getElementById('countdown');
+
+        const countdownInterval = setInterval(() => {
+            timeLeft--;
+            if (countdownElement && timeLeft >= 0) {
+                countdownElement.textContent = timeLeft.toString();
+            }
+            if (timeLeft < 0) {
+                clearInterval(countdownInterval);
+            }
+        }, 1000);
+
+        // Spotlight data — injected by Electron main process via executeJavaScript
+        window.activateSpotlight = function(data) {
+            const container = document.getElementById('spotlightContainer');
+            const defaultLoader = document.getElementById('defaultLoader');
+            const bannerEl = document.getElementById('spotlightBanner');
+
+            // Use splash images if available, otherwise fall back to bannerUrl
+            var images = (data.splashImages && data.splashImages.length > 0) ? data.splashImages : [data.bannerUrl];
+            var currentImageIndex = 0;
+
+            bannerEl.style.backgroundImage = 'url(' + images[0] + ')';
+
+            // Rotate splash images every 4 seconds if multiple
+            if (images.length > 1) {
+                setInterval(function() {
+                    currentImageIndex = (currentImageIndex + 1) % images.length;
+                    bannerEl.style.transition = 'opacity 0.5s ease';
+                    bannerEl.style.opacity = '0';
+                    setTimeout(function() {
+                        bannerEl.style.backgroundImage = 'url(' + images[currentImageIndex] + ')';
+                        bannerEl.style.opacity = '1';
+                    }, 500);
+                }, 4000);
+            }
+
+            document.getElementById('spotlightName').textContent = data.serverName;
+            document.getElementById('spotlightCatchphrase').textContent = data.catchphrase || '';
+            document.getElementById('spotlightPlayers').textContent = (data.playerCount || 0) + '/' + (data.maxPlayers || 0) + ' players';
+            document.getElementById('spotlightMap').textContent = data.map || 'Unknown';
+
+            // Show mods count if available
+            if (data.modCount && data.modCount > 0) {
+                document.getElementById('spotlightMods').textContent = data.modCount + ' mods';
+                document.getElementById('spotlightMods').style.display = '';
+                document.getElementById('spotlightModsSep').style.display = '';
+            }
+
+            container.classList.add('active');
+            defaultLoader.style.display = 'none';
+
+            // Spotlight countdown (6 seconds) + progress bar
+            var spotlightDuration = 6;
+            var spotlightTimeLeft = spotlightDuration;
+            var spotlightCountdownEl = document.getElementById('spotlightCountdown');
+            var spotlightProgressEl = document.getElementById('spotlightProgressBar');
+            var spotlightQuoteEl = document.getElementById('spotlightQuote');
+
+            // Smooth progress bar — update every 100ms
+            var progressStart = Date.now();
+            var progressInterval = setInterval(function() {
+                var elapsed = (Date.now() - progressStart) / 1000;
+                var pct = Math.min((elapsed / spotlightDuration) * 100, 100);
+                if (spotlightProgressEl) {
+                    spotlightProgressEl.style.width = pct + '%';
+                }
+                if (pct >= 100) {
+                    clearInterval(progressInterval);
+                }
+            }, 100);
+
+            // Countdown — update every second
+            var spotlightCdInterval = setInterval(function() {
+                spotlightTimeLeft--;
+                if (spotlightCountdownEl && spotlightTimeLeft >= 0) {
+                    spotlightCountdownEl.textContent = spotlightTimeLeft.toString();
+                }
+                if (spotlightTimeLeft <= 0) {
+                    clearInterval(spotlightCdInterval);
+                }
+            }, 1000);
+
+            // Splash quotes rotation
+            if (data.splashQuotes && data.splashQuotes.length > 0) {
+                var quotes = data.splashQuotes;
+                var quoteIndex = 0;
+
+                if (spotlightQuoteEl) {
+                    spotlightQuoteEl.textContent = '"' + quotes[0] + '"';
+                }
+
+                if (quotes.length > 1) {
+                    setInterval(function() {
+                        quoteIndex = (quoteIndex + 1) % quotes.length;
+                        if (spotlightQuoteEl) {
+                            spotlightQuoteEl.style.opacity = '0';
+                            setTimeout(function() {
+                                spotlightQuoteEl.textContent = '"' + quotes[quoteIndex] + '"';
+                                spotlightQuoteEl.style.opacity = '1';
+                            }, 300);
+                        }
+                    }, 3000);
+                }
+            }
+        };
+
+        // Join button — stores intent so Electron/Angular can pick it up
+        window.spotlightJoinRequested = false;
+        function requestJoin() {
+            window.spotlightJoinRequested = true;
+            var btn = document.getElementById('spotlightJoinBtn');
+            if (btn) {
+                btn.textContent = 'JOINING AFTER LOAD...';
+                btn.style.opacity = '0.7';
+                btn.disabled = true;
+            }
+        }
+
+        // Update loading tips (only in default mode) - Launcher tips
+        const loadingTips = [
+            'Tip: Use the server browser to find your perfect DayZ experience',
+            'Tip: One-click join automatically downloads and manages mods',
+            'Tip: Favorite servers for quick access to your preferred communities',
+            'Tip: Check server details to see mods, maps, and player counts',
+            'Tip: The launcher keeps your mods organized and up to date',
+            'Tip: Join the Day(Z) Beans community for server recommendations',
+            'Tip: Filter servers by map, mods, or player count',
+            'Tip: Server customization options let you personalize your experience'
+        ];
+
+        let tipIndex = 0;
+        const loadingTipsElement = document.getElementById('loadingTips');
+
+        const tipInterval = setInterval(() => {
+            tipIndex = (tipIndex + 1) % loadingTips.length;
+            if (loadingTipsElement) {
+                loadingTipsElement.style.opacity = '0';
+                setTimeout(() => {
+                    loadingTipsElement.textContent = loadingTips[tipIndex];
+                    loadingTipsElement.style.opacity = '1';
+                }, 300);
+            }
+        }, 4000);
+
+        // Listen for app ready signal from Electron
+        window.addEventListener('message', (event) => {
+            if (event.data === 'app-ready') {
+                clearInterval(textInterval);
+                if (loadingTextElement) {
+                    loadingTextElement.textContent = 'Launching application...';
+                }
+
+                // Fade out loading screen
+                document.body.style.transition = 'opacity 0.5s ease-out';
+                document.body.style.opacity = '0';
+
+                setTimeout(() => {
+                    // Signal back to Electron that we're ready to switch
+                    window.electronAPI?.loadingComplete();
+                }, 500);
+            }
+        });
+    </script>
+</body>
+</html>

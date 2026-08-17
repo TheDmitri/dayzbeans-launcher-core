@@ -1,0 +1,14 @@
+# The public core repository holds source only. Everything below is produced by
+# `npm ci && npx tsc -p tsconfig.electron.json`, which is exactly what a reader
+# runs to reproduce ELECTRON-HASHES.txt -- committing the output would defeat the
+# point of checking it.
+node_modules/
+dist-electron/
+dist-angular/
+release/
+build/
+
+*.log
+.DS_Store
+.idea/
+.vscode/

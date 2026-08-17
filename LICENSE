@@ -1,0 +1,95 @@
+Day(Z) Beans Launcher - Core Source Availability License
+Version 1.0
+
+Copyright (c) 2026 Dmitri. All rights reserved.
+
+This repository contains source code for the Electron main process of the
+Day(Z) Beans Launcher (the "Software"). It is published so that anyone can read
+and independently verify what the Software does on their computer.
+
+This is SOURCE-AVAILABLE software, not open source. No rights are granted
+except those stated in Section 1.
+
+
+1. WHAT YOU MAY DO
+
+   At no charge, and without asking permission, you may:
+
+   a. view, download, and clone this repository;
+
+   b. compile this source code and run the result on your own machine, for the
+      purpose of verifying that it corresponds to a distributed build of the
+      Software;
+
+   c. quote, excerpt, publish, and publicly discuss any part of this source
+      code -- including in security research, vulnerability disclosure,
+      reviews, articles, and public forums -- without prior notice to or
+      approval from the copyright holder;
+
+   d. make local modifications for the purposes described in (b) and (c).
+
+
+2. WHAT YOU MAY NOT DO
+
+   Except as permitted by Section 1, you may not:
+
+   a. redistribute this source code, or any part of it, modified or unmodified;
+
+   b. distribute any binary or artifact built from this source code;
+
+   c. use this source code, or any part of it, in any other software, product,
+      or service, whether commercial or non-commercial, whether or not that
+      software is itself distributed;
+
+   d. create or distribute derivative works;
+
+   e. remove or alter this notice or any copyright notice.
+
+   Section 1(c) always prevails: nothing in this Section restricts publishing
+   or discussing a security finding about this code.
+
+
+3. CONTRIBUTIONS ARE NOT ACCEPTED
+
+   This repository is published for reading and verification, not for
+   collaboration. Pull requests are disabled and unsolicited patches will not
+   be merged, so that the copyright in this codebase stays undivided.
+
+   Bug reports and security findings are welcome through the issue tracker and
+   through SECURITY.md.
+
+
+4. NO WARRANTY
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+   WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+   IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
+
+
+5. THIRD-PARTY CODE
+
+   This repository depends on third-party packages distributed under their own
+   licenses. Those licenses govern those packages, not this one. See
+   THIRD-PARTY-NOTICES.txt.
+
+
+6. TRADEMARKS
+
+   This license grants no rights to the "Day(Z) Beans Launcher" name, logo, or
+   branding. "DayZ" is a trademark of Bohemia Interactive a.s., which does not
+   endorse and is not affiliated with this project.
+
+
+7. TERMINATION
+
+   Rights under Section 1 terminate automatically if you breach Section 2.
+   Section 1(c) survives termination.
+
+
+8. OTHER USES
+
+   For any use beyond Section 1, contact the copyright holder.

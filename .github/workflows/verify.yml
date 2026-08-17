@@ -1,0 +1,80 @@
+name: Verify published source
+
+# WHY THIS WORKFLOW EXISTS
+# ========================
+# This repository claims that the source in it is the source the released launcher
+# was built from. ELECTRON-HASHES.txt is the evidence: the SHA256 of every compiled
+# main-process file in that release.
+#
+# A claim nobody re-checks is just a claim. This workflow recompiles the source in
+# this repository and asserts the result reproduces ELECTRON-HASHES.txt exactly --
+# on every push, in public. If a snapshot were ever published that does not compile
+# to the shipped binary, this goes red where anyone can see it, without anyone
+# having to notice by hand.
+#
+# It also proves the reproducibility the README asks users to rely on: the run below
+# is the same three commands a user runs locally, on a machine we do not control the
+# state of.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  # A monthly run catches the other failure mode: reproducibility quietly breaking
+  # underneath us (a toolchain change, a dependency resolving differently) on a
+  # snapshot that has not been touched in months.
+  schedule:
+    - cron: '0 6 1 * *'
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    name: Recompile and compare (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      # Releases are built on Windows. Verifying on Linux and macOS too shows the
+      # reproduction is not an artefact of one runner image -- a user on any
+      # platform gets the same hashes.
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the Node version this snapshot was built with
+        id: node
+        shell: bash
+        run: echo "version=$(node -p "require('./package.json').engines?.node?.replace(/[^0-9.]/g,'') || '24'")" >> $GITHUB_OUTPUT
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile the Electron main process
+        run: npx tsc -p tsconfig.electron.json
+
+      - name: Compare against the published manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f ELECTRON-HASHES.txt ]; then
+            echo "::notice::No ELECTRON-HASHES.txt in this snapshot yet - nothing to compare."
+            exit 0
+          fi
+          node scripts/electron-hashes.js --dir dist-electron --check ELECTRON-HASHES.txt
+
+      - name: Explain a failure
+        if: failure()
+        shell: bash
+        run: |
+          echo "::error::This snapshot does not reproduce its published hashes."
+          echo "Either the source here is not what the release was built from, or the"
+          echo "compilation stopped being reproducible. Both are bugs worth reporting:"
+          echo "admin@dayzbeanslauncher.com"
