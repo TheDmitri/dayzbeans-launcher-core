@@ -80,6 +80,34 @@ export const StoreKeySchema = z
     'must not traverse the object prototype'
   );
 
+/**
+ * Ceiling on the offline snapshot written to disk.
+ *
+ * A 2000-server snapshot is ~540 KB, so 8 MB is far above any real payload. This is
+ * the bound that matters for these channels: `payload` is stored opaque rather than
+ * parsed, so the cap -- not a structural schema -- is what stops a compromised
+ * renderer from filling the user's disk.
+ */
+export const SNAPSHOT_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The snapshot envelope as written to `<userData>/server-snapshot.json`.
+ *
+ * `payload` stays an opaque string on purpose. Zod-validating 2000 nested server rows
+ * on every write would cost main-process CPU for no security benefit: the bytes come
+ * from our own HTTPS backend and are handed straight back to the renderer, which
+ * validates the structure as part of decoding it. Keeping it a string also avoids a
+ * structured clone of a 2000-object graph across the bridge.
+ */
+export const SnapshotEnvelopeSchema = z.object({
+  formatVersion: z.number().int().positive(),
+  fetchedAt: z.number().int().nonnegative(),
+  generatedAt: z.string().max(64),
+  etag: z.string().max(128).nullable(),
+  limit: z.number().int().min(1).max(5000),
+  payload: z.string().min(1).max(SNAPSHOT_MAX_BYTES)
+});
+
 // ============================================================================
 // Server Schemas
 // ============================================================================

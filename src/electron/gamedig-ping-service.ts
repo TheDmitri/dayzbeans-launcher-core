@@ -10,39 +10,6 @@
 
 import { GameDig } from 'gamedig';
 
-// Cache for ping results to avoid hammering servers
-const pingCache = new Map<string, { ping: number; timestamp: number }>();
-const CACHE_DURATION = 30000; // 30 seconds cache
-
-/**
- * Generate cache key for a server
- */
-function getCacheKey(ip: string, port: number): string {
-  return `${ip}:${port}`;
-}
-
-/**
- * Get cached ping if still valid
- */
-function getCachedPing(ip: string, port: number): number | null {
-  const key = getCacheKey(ip, port);
-  const cached = pingCache.get(key);
-  
-  if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
-    return cached.ping;
-  }
-  
-  return null;
-}
-
-/**
- * Cache a ping result
- */
-function cachePing(ip: string, port: number, ping: number): void {
-  const key = getCacheKey(ip, port);
-  pingCache.set(key, { ping, timestamp: Date.now() });
-}
-
 export interface GameDigPingResult {
   success: boolean;
   ping: number;
@@ -53,6 +20,45 @@ export interface GameDigPingResult {
     players: number;
     maxPlayers: number;
   };
+}
+
+// Cache for query results to avoid hammering servers.
+//
+// The whole result is cached, not just the ping. Caching only the number meant a
+// cache hit returned `{ success, ping }` with no `serverInfo`, so every caller that
+// wanted the player count silently got nothing whenever the 30s window was warm —
+// including pingServersGameDig, which delegates here. Degraded mode reads player
+// counts straight off these results, so the omission is load-bearing now.
+const pingCache = new Map<string, { result: GameDigPingResult; timestamp: number }>();
+const CACHE_DURATION = 30000; // 30 seconds cache
+
+/**
+ * Generate cache key for a server
+ */
+function getCacheKey(ip: string, port: number): string {
+  return `${ip}:${port}`;
+}
+
+/**
+ * Get a cached query result if still valid
+ */
+function getCachedResult(ip: string, port: number): GameDigPingResult | null {
+  const key = getCacheKey(ip, port);
+  const cached = pingCache.get(key);
+
+  if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+    return cached.result;
+  }
+
+  return null;
+}
+
+/**
+ * Cache a query result
+ */
+function cacheResult(ip: string, port: number, result: GameDigPingResult): void {
+  const key = getCacheKey(ip, port);
+  pingCache.set(key, { result, timestamp: Date.now() });
 }
 
 /**
@@ -70,10 +76,10 @@ export async function pingServerGameDig(
 ): Promise<GameDigPingResult> {
   try {
     // Check cache first
-    const cachedPing = getCachedPing(ip, queryPort);
-    if (cachedPing !== null) {
-      console.log(`[GameDig] Using cached ping for ${ip}:${queryPort}: ${cachedPing}ms`);
-      return { success: true, ping: cachedPing };
+    const cached = getCachedResult(ip, queryPort);
+    if (cached !== null) {
+      console.log(`[GameDig] Using cached result for ${ip}:${queryPort}: ${cached.ping}ms`);
+      return cached;
     }
 
     const startTime = performance.now();
@@ -94,11 +100,8 @@ export async function pingServerGameDig(
     const ping = state.ping ?? Math.round(endTime - startTime);
     
     console.log(`[GameDig] Success for ${ip}:${queryPort}: ${ping}ms - ${state.name}`);
-    
-    // Cache the result
-    cachePing(ip, queryPort, ping);
-    
-    return {
+
+    const result: GameDigPingResult = {
       success: true,
       ping,
       serverInfo: {
@@ -108,6 +111,13 @@ export async function pingServerGameDig(
         maxPlayers: state.maxplayers,
       }
     };
+
+    // Cache the whole result, so a hit still carries serverInfo.
+    // Failures stay uncached on purpose: a server that comes back should be visible
+    // on the next query rather than after the TTL expires.
+    cacheResult(ip, queryPort, result);
+
+    return result;
   } catch (error) {
     const errorMessage = (error as Error).message || 'Unknown error';
     console.log(`[GameDig] Failed for ${ip}:${queryPort}: ${errorMessage}`);

@@ -19,6 +19,14 @@ import { pingServerGameDig, pingServersGameDig, getServerInfoGameDig, clearPingC
 import { isSteamInitialized, ensureSteamInitialized, getSteamUserInfo, getSubscribedItems, getSubscribedItemsFast, subscribeToItem, unsubscribeFromItem, getItemDownloadInfo, isModInstalled, getItemInstallInfo, forceDownloadItem, getModSizes, getWorkshopItemDetails, getWorkshopItemDetailsBatch } from './steam-service';
 import { discordService, PresenceData } from './discord-service';
 import { getSuspensionState } from './app-suspension';
+import {
+  SNAPSHOT_FILENAME,
+  clearSnapshot,
+  readSnapshot,
+  statSnapshot,
+  writeSnapshot,
+  type SnapshotFs
+} from './snapshot-store';
 import { getActualDayZWorkshopPath } from './platform-utils';
 
 // Every channel below is registered through `handle`, which will not compile
@@ -45,6 +53,7 @@ import {
   SettingsPayloadSchema,
   StoreKeySchema,
   TimeoutMsSchema,
+  SnapshotEnvelopeSchema,
   WorkshopIdSchema
 } from './types/ipc-schemas';
 
@@ -914,6 +923,21 @@ export function registerIPCHandlers(): void {
   // (used e.g. by the version-upgrade changelog flow in app.component).
   // =============================================================================
 
+  // =============================================================================
+  // Offline snapshot (see snapshot-store.ts for why this is its own file rather
+  // than a key in the shared electron-store config)
+  // =============================================================================
+
+  handle('snapshot-write', z.tuple([SnapshotEnvelopeSchema]), (envelope) =>
+    writeSnapshot(snapshotFs, snapshotPath(), envelope)
+  );
+
+  handle('snapshot-read', NO_ARGS, () => readSnapshot(snapshotFs, snapshotPath()));
+
+  handle('snapshot-clear', NO_ARGS, () => clearSnapshot(snapshotFs, snapshotPath()));
+
+  handle('snapshot-stat', NO_ARGS, () => statSnapshot(snapshotFs, snapshotPath()));
+
   handle('setStoreData', z.tuple([StoreKeySchema, z.unknown()]), (key, value) => {
     try {
       store.set(key, value);
@@ -943,3 +967,20 @@ export function registerIPCHandlers(): void {
     }
   });
 }
+
+/** Where the offline snapshot lives. Resolved lazily: app paths are not ready at import time. */
+function snapshotPath(): string {
+  return path.join(app.getPath('userData'), SNAPSHOT_FILENAME);
+}
+
+/**
+ * The real filesystem, adapted to the narrow interface snapshot-store depends on so
+ * that its logic can be unit-tested against a fake.
+ */
+const snapshotFs: SnapshotFs = {
+  writeFile: (file, data, encoding) => fs.promises.writeFile(file, data, encoding),
+  readFile: (file, encoding) => fs.promises.readFile(file, encoding),
+  rename: (from, to) => fs.promises.rename(from, to),
+  unlink: (file) => fs.promises.unlink(file),
+  stat: (file) => fs.promises.stat(file)
+};

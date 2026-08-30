@@ -33,6 +33,10 @@ const VALID_CHANNELS = [
   'setStoreData',
   'getStoreData',
   'deleteStoreData',
+  'snapshot-write',
+  'snapshot-read',
+  'snapshot-clear',
+  'snapshot-stat',
   'steam-is-initialized',
   'steam-ensure-initialized',
   'steam-init-status',
@@ -160,6 +164,13 @@ const electronAPI: ElectronAPI = {
   isFullscreen: () => ipcRenderer.invoke('window-is-fullscreen'),
 
   // Server Functionality
+  // Offline server-list snapshot. Kept out of the shared electron-store config on
+  // purpose -- see snapshot-store.ts.
+  snapshotWrite: (envelope: unknown) => ipcRenderer.invoke('snapshot-write', envelope),
+  snapshotRead: () => ipcRenderer.invoke('snapshot-read'),
+  snapshotClear: () => ipcRenderer.invoke('snapshot-clear'),
+  snapshotStat: () => ipcRenderer.invoke('snapshot-stat'),
+
   joinServer: (serverData: ServerData) => ipcRenderer.invoke('join-server', serverData),
   pingServer: (host: string) => ipcRenderer.invoke('ping-server', host),
   pingServerGameDig: (ip: string, queryPort: number, timeout?: number) =>

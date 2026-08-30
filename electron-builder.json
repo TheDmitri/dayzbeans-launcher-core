@@ -49,6 +49,7 @@
   },
   "linux": {
     "icon": "build/icon.png",
+    "executableName": "dayz-beans-launcher",
     "target": ["AppImage", "deb", "tar.gz"],
     "category": "Game",
     "synopsis": "DayZ Server Browser and Mod Manager",

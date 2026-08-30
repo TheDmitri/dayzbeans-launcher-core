@@ -14,7 +14,7 @@ export const environment = {
   // Pointed at the local API so features can be exercised before they exist on
   // staging (staging answers 403 for endpoints it has not deployed yet). Swap
   // back to https://staging-api.dayzbeanslauncher.com/api to test against staging.
-  apiUrl: 'http://localhost:8088/api',
+  apiUrl: 'https://staging-api.dayzbeanslauncher.com/api',
   frontUrl: 'https://staging.dayzbeanslauncher.com',
   
   // Feature Flags

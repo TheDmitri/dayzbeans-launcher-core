@@ -1,6 +1,6 @@
 {
   "name": "dayz-bean-launcher",
-  "version": "1.4.3",
+  "version": "1.5.0",
   "description": "The Best Community Launcher for DayZ",
   "author": {
     "name": "Dmitri",
@@ -42,6 +42,7 @@
     "lint:electron": "eslint \"src/electron/**/*.ts\"",
     "lint:electron:fix": "eslint \"src/electron/**/*.ts\" --fix",
     "core:boundary": "node scripts/check-core-public-boundary.js",
+    "core:lockcheck": "node scripts/check-lockfile-platforms.js",
     "core:hashes": "node scripts/electron-hashes.js --dir dist-electron --out ELECTRON-HASHES.txt",
     "core:notices": "node scripts/generate-third-party-notices.js",
     "core:sync": "node scripts/sync-core-public.js"

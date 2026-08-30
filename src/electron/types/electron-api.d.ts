@@ -385,6 +385,12 @@ export interface ElectronAPI {
   // Store Data
   setStoreData: (key: string, value: any) => Promise<void>;
   getStoreData: (key: string) => Promise<any>;
+
+  /** Offline server-list snapshot, stored in its own userData file. */
+  snapshotWrite: (envelope: SnapshotEnvelope) => Promise<{ success: boolean; bytes: number; error?: string }>;
+  snapshotRead: () => Promise<SnapshotEnvelope | null>;
+  snapshotClear: () => Promise<{ success: boolean }>;
+  snapshotStat: () => Promise<SnapshotStat>;
   deleteStoreData: (key: string) => Promise<void>;
 
   /**
@@ -524,6 +530,10 @@ export type IPCChannel =
   | 'set-auto-start'
   | 'get-auto-start'
   | 'start-minimized'
+  | 'snapshot-write'
+  | 'snapshot-read'
+  | 'snapshot-clear'
+  | 'snapshot-stat'
   | 'setStoreData'
   | 'getStoreData'
   | 'deleteStoreData'
@@ -534,3 +544,21 @@ export type IPCChannel =
   | 'app-suspended'
   | 'app-resumed'
   | 'protocol-action';
+
+/** Envelope persisted at `<userData>/server-snapshot.json`. */
+export interface SnapshotEnvelope {
+  formatVersion: number;
+  fetchedAt: number;
+  generatedAt: string;
+  etag: string | null;
+  limit: number;
+  /** Opaque snapshot JSON, decoded in the renderer. */
+  payload: string;
+}
+
+export interface SnapshotStat {
+  exists: boolean;
+  bytes: number;
+  fetchedAt: number | null;
+  generatedAt: string | null;
+}

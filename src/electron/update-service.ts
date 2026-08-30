@@ -39,19 +39,36 @@ let autoDownloadEnabled = true;
 let autoInstallEnabled = true;
 
 // Interfaces
+/**
+ * The shape the backend actually sends, field for field.
+ *
+ * This used to be an invented shape: `checksum`, `releaseNotes`, `isMandatory` and
+ * `updateAvailable` are not names the backend ever serialises, so every one of them
+ * read as `undefined` on every update check. It went unnoticed because each had a
+ * harmless-looking fallback -- the version comparison below covered `updateAvailable`,
+ * a default string covered the release notes, and the checksum verification was
+ * conditional and therefore skipped entirely.
+ *
+ * The checksum being mandatory now removes the last of those cushions, so the names
+ * have to match LauncherVersionDTO.java exactly. They are Lombok getters serialised
+ * by Jackson: `Boolean mandatory` -> `mandatory`, `Boolean isNewerThanCurrent` ->
+ * `isNewerThanCurrent`. Do not "tidy" these into nicer names without changing the
+ * Java DTO with them.
+ */
 interface LauncherVersionDTO {
   id: number;
   version: string;
   platform: string;
   downloadUrl: string;
-  releaseNotes: string;
+  /** The Java field is `changelog`; there is no `releaseNotes` on the response. */
+  changelog: string;
   releaseDate: string;
   fileSize: number;
-  checksum: string;
-  isMandatory: boolean;
-  isLatest: boolean;
-  minRequiredVersion?: string;
-  updateAvailable?: boolean;
+  /** SHA-256, hex. See calculateChecksum() for why it is not SHA-512. */
+  fileChecksum: string;
+  mandatory: boolean;
+  /** Set by the /compare/{version} endpoint only. */
+  isNewerThanCurrent?: boolean;
 }
 
 interface UpdateCheckResult {
@@ -150,21 +167,27 @@ export async function checkForUpdates(): Promise<UpdateCheckResult> {
     
     lastUpdateCheck = new Date();
     
-    const updateAvailable = versionInfo.updateAvailable === true || 
+    const updateAvailable = versionInfo.isNewerThanCurrent === true ||
                            compareVersions(versionInfo.version, currentVersion) > 0;
-    
+
     console.log(`🔄 Update check complete: ${updateAvailable ? 'Update available!' : 'Up to date'}`);
     console.log(`🔄 Latest version: ${versionInfo.version}, Current: ${currentVersion}`);
-    
+
+    // Logged because a manifest with no checksum is now a refusal at install time,
+    // and finding that out during the download is far too late to diagnose.
+    if (updateAvailable && !versionInfo.fileChecksum) {
+      console.warn('⚠️ Update manifest carries no fileChecksum; an automatic install will refuse it.');
+    }
+
     return {
       updateAvailable,
       currentVersion,
       latestVersion: versionInfo.version,
       downloadUrl: versionInfo.downloadUrl,
-      releaseNotes: versionInfo.releaseNotes,
-      isMandatory: versionInfo.isMandatory,
+      releaseNotes: versionInfo.changelog,
+      isMandatory: versionInfo.mandatory,
       fileSize: versionInfo.fileSize,
-      checksum: versionInfo.checksum
+      checksum: versionInfo.fileChecksum
     };
     
   } catch (error) {
@@ -428,11 +451,16 @@ function downloadFile(url: string, destPath: string, onProgress?: (progress: num
 }
 
 /**
- * Calculate SHA512 checksum of a file
+ * Calculate the SHA-256 checksum of a file, as lowercase hex.
+ *
+ * SHA-256 because that is the digest the rest of the release pipeline speaks:
+ * SHA256SUMS.txt, the `sha256` fields in latest.json, APP-ASAR-SHA256.txt and the
+ * value CI registers with the backend are all SHA-256. This function computed
+ * SHA-512, so even a manifest that did carry a checksum could never have matched.
  */
 function calculateChecksum(filePath: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const hash = crypto.createHash('sha512');
+    const hash = crypto.createHash('sha256');
     const stream = fs.createReadStream(filePath);
     
     stream.on('error', reject);

@@ -200,6 +200,36 @@ drifts from the code, so it cannot quietly fall out of date.
 ### Steam status
 
 - `get-steam-status` — combined Steam running/initialised state for the header
+
+### DayZ profiles
+
+DayZ keeps your keybinds, video settings and gamma in a profile folder outside the
+game install. These channels read that folder and can copy a profile within it;
+nothing here writes to a profile you already use.
+
+- `list-dayz-profiles` — list the profiles found in your DayZ profiles folder
+- `resolve-profiles-folder` — report where that folder is and whether it exists
+- `open-profiles-folder` — open it in your file manager
+- `clone-dayz-profile` — copy an existing profile to a new name
+- `check-dayz-profile-drift` — notice that the profile DayZ is using has changed
+
+### Offline server list
+
+The server list is saved to a single file in the launcher's own data folder so the
+list still opens when our servers cannot be reached. It holds public server
+information only — the same list anyone sees before signing in.
+
+- `snapshot-write` — save the current server list (size-capped)
+- `snapshot-read` — load the saved list
+- `snapshot-stat` — report its size and age
+- `snapshot-clear` — delete it, also exposed as **Settings → Cache → Offline server list**
+
+### Diagnostics and support
+
+- `open-log-folder` — show the launcher's log file in your file manager
+- `steam-get-diagnostics` — collect Steam detection details for a support report. The
+  report is redacted before it reaches the interface: your home directory and
+  username are stripped, because it is written to be pasted in public.
 <!-- IPC_CHANNELS_END -->
 
 ---
