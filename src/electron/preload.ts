@@ -32,6 +32,7 @@ const VALID_CHANNELS = [
   // Generic store data (camelCase invoke channels)
   'setStoreData',
   'getStoreData',
+  'get-anonymous-id',
   'deleteStoreData',
   'snapshot-write',
   'snapshot-read',
@@ -61,6 +62,11 @@ const VALID_CHANNELS = [
   'get-api-urls',
   'mod-download-status',
   'mod-download-progress',
+  'steam-get-mod-update-status',
+  'steam-get-mod-update-statuses',
+  'mods-sweep-updates',
+  // Background update sweep progress (main → renderer, one-way via .on)
+  'mod-update-sweep',
   'set-close-to-tray',
   'set-minimize-to-tray',
   'set-auto-start',
@@ -69,6 +75,7 @@ const VALID_CHANNELS = [
   'show-update-dialog',
   'protocol-action',
   'verify-dayz-installation',
+  'find-dayz-edition',
   'list-dayz-profiles',
   'clone-dayz-profile',
   'check-dayz-profile-drift',
@@ -87,6 +94,8 @@ const VALID_CHANNELS = [
   // App suspension channels
   'app-suspended',
   'app-resumed',
+  // Music mute flipped from the taskbar button or the tray (main → renderer)
+  'music-mute-changed',
   'get-suspension-state',
   // Mod folder
   'open-mod-folder',
@@ -164,6 +173,10 @@ const electronAPI: ElectronAPI = {
   isFullscreen: () => ipcRenderer.invoke('window-is-fullscreen'),
 
   // Server Functionality
+  // Anonymous install id, owned by the main process (see electron/anonymous-id.ts).
+  // `legacyId` carries the renderer's old localStorage value so an existing install
+  // keeps the identity the backend already knows it by.
+  getAnonymousId: (legacyId?: string) => ipcRenderer.invoke('get-anonymous-id', legacyId),
   // Offline server-list snapshot. Kept out of the shared electron-store config on
   // purpose -- see snapshot-store.ts.
   snapshotWrite: (envelope: unknown) => ipcRenderer.invoke('snapshot-write', envelope),
@@ -180,6 +193,10 @@ const electronAPI: ElectronAPI = {
   getServerInfoGameDig: (ip: string, queryPort: number, timeout?: number) =>
     ipcRenderer.invoke('get-server-info-gamedig', ip, queryPort, timeout),
   clearPingCache: () => ipcRenderer.invoke('clear-ping-cache'),
+  // Direct Connect (see local-servers/local-server-discovery.ts)
+  discoverLocalServers: (options: { lan: boolean }) => ipcRenderer.invoke('discover-local-servers', options),
+  queryDayZServer: (target: { host: string; gamePort: number; queryPortHint?: number }) =>
+    ipcRenderer.invoke('query-dayz-server', target),
 
   // Steam Workshop Integration
   isSteamInitialized: () => ipcRenderer.invoke('steam-is-initialized'),
@@ -202,6 +219,9 @@ const electronAPI: ElectronAPI = {
   getWorkshopItemDetailsBatch: (publishedFileIds: string[]) => ipcRenderer.invoke('steam-get-workshop-items-batch', publishedFileIds),
   isModInstalled: (publishedFileId: string) => ipcRenderer.invoke('is-mod-installed', publishedFileId),
   forceDownloadItem: (publishedFileId: string) => ipcRenderer.invoke('steam-force-download', publishedFileId),
+  getModUpdateStatus: (publishedFileId: string, queryWorkshop?: boolean) => ipcRenderer.invoke('steam-get-mod-update-status', publishedFileId, queryWorkshop),
+  getModUpdateStatuses: (publishedFileIds: string[]) => ipcRenderer.invoke('steam-get-mod-update-statuses', publishedFileIds),
+  sweepModUpdates: () => ipcRenderer.invoke('mods-sweep-updates'),
   getModSizes: (workshopIds: string[]) => ipcRenderer.invoke('steam-get-mod-sizes', workshopIds),
   joinServerWithMods: (serverData: ServerData) => ipcRenderer.invoke('join-server', serverData),
   cancelJoinProcess: () => ipcRenderer.invoke('cancel-join-process'),
@@ -244,6 +264,7 @@ const electronAPI: ElectronAPI = {
 
   // DayZ Installation Verification
   verifyDayZInstallation: () => ipcRenderer.invoke('verify-dayz-installation'),
+  findDayZEdition: (edition: 'stable' | 'experimental') => ipcRenderer.invoke('find-dayz-edition', edition),
   verifyDayZPath: (dayzPath: string) => ipcRenderer.invoke('verify-dayz-path', dayzPath),
   listDayZProfiles: () => ipcRenderer.invoke('list-dayz-profiles'),
   cloneDayZProfile: (sourceName: string, sourceDirectory: string, newName: string) =>
@@ -282,6 +303,13 @@ const electronAPI: ElectronAPI = {
     setManagingMods: (modCount?: number) => ipcRenderer.invoke('discord-set-managing-mods', modCount),
     clearPresence: () => ipcRenderer.invoke('discord-clear-presence'),
     isConnected: () => ipcRenderer.invoke('discord-is-connected'),
+  },
+
+  // Music mute flipped from the taskbar thumbnail button or the tray menu
+  onMusicMuteChanged: (callback: (muted: boolean) => void) => {
+    const handler = (_event: IpcRendererEvent, muted: boolean) => callback(muted === true);
+    ipcRenderer.on('music-mute-changed', handler);
+    return () => ipcRenderer.removeListener('music-mute-changed', handler);
   },
 
   // App Suspension API

@@ -3,6 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <title>Day(Z) Beans Launcher - Loading...</title>
+    <script>
+        // Seasonal splash, same window as the Halloween theme (theme.service.ts, Oct 1 -
+        // Nov 7). Date only: this page shows before the renderer, which holds the theme.
+        (function () {
+            var d = new Date(), v = (d.getMonth() + 1) * 100 + d.getDate();
+            if (v >= 1001 && v <= 1107) document.documentElement.className += ' season-halloween';
+        })();
+    </script>
     <style>
         * {
             margin: 0;
@@ -21,6 +29,30 @@
             font-family: 'Rajdhani', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             overflow: hidden;
             position: relative;
+        }
+
+        .intro-veil {
+            position: fixed;
+            inset: 0;
+            background: #000;
+            z-index: 9999;
+            pointer-events: none;
+            animation: intro-veil-lift 2.6s cubic-bezier(0.55, 0, 0.35, 1) 0.1s forwards;
+        }
+
+        @keyframes intro-veil-lift {
+            to { opacity: 0; visibility: hidden; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .intro-veil { animation-duration: 0.4s; }
+        }
+
+        html.season-halloween body {
+            background-image: url('loading_logo_halloween.jpg');
+            /* Lower framing: keeps the pumpkin above the progress panel and the eyes in
+               view on 16:9 and 16:10 windows */
+            background-position: center 70%;
         }
 
         body::before {
@@ -425,6 +457,9 @@
     </style>
 </head>
 <body>
+    <!-- Opens on black and fades in with the intro's wind (about 2.5 s). Removed at once
+         when a promoted server takes the splash (activateSpotlight). -->
+    <div class="intro-veil" aria-hidden="true"></div>
     <div class="particles" id="particles"></div>
 
     <!-- Spotlight Mode (hidden by default, activated via JS) -->
@@ -501,6 +536,10 @@
 
         // Spotlight data — injected by Electron main process via executeJavaScript
         window.activateSpotlight = function(data) {
+            // A promoted server paid for this screen time: show it at once, no fade-in
+            var veil = document.querySelector('.intro-veil');
+            if (veil) veil.remove();
+
             const container = document.getElementById('spotlightContainer');
             const defaultLoader = document.getElementById('defaultLoader');
             const bannerEl = document.getElementById('spotlightBanner');
@@ -650,6 +689,29 @@
                 }, 500);
             }
         });
+    </script>
+    <script>
+        // Intro music. main.ts passes music=0|1 and volume=0..1 (the renderer's sound
+        // settings, saved to electron-store), and calls fadeOutIntro() before it replaces
+        // this page with the app; the return value is how long to wait, in ms.
+        (function () {
+            var query = new URLSearchParams(location.search);
+            var volume = Math.min(1, Math.max(0, parseFloat(query.get('volume') || '0.5')));
+            if (query.get('music') !== '1' || !(volume > 0)) return;
+            var audio = new Audio('loading_intro.ogg');
+            audio.volume = volume;
+            audio.play().catch(function () { /* no audio device: stay silent */ });
+            window.fadeOutIntro = function () {
+                if (audio.paused || audio.ended) return 0;
+                var steps = 15, step = 0, from = audio.volume;
+                var timer = setInterval(function () {
+                    step++;
+                    audio.volume = Math.max(0, from * (1 - step / steps));
+                    if (step >= steps) { clearInterval(timer); audio.pause(); }
+                }, 50);
+                return 750;
+            };
+        })();
     </script>
 </body>
 </html>

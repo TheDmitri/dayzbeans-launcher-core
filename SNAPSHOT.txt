@@ -1,5 +1,5 @@
 # This directory is a snapshot, published automatically by the launcher release
 # workflow. It is not the development repository.
 
-launcher_version: 1.5.0
-source_commit: 472f4e542c0cc1839ccec7ffa953507cb1eb9f91
+launcher_version: 1.6.1
+source_commit: dc0781ff98a7dfa8b3c254b03e4c23536e30c1f1

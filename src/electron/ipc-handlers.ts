@@ -13,11 +13,12 @@ import { logToFile, getLogFilePath } from './logger';
 import { getMainWindow, setCloseToTray, setIsMinimizedToTray, getIsMinimizedToTray } from './main';
 import { launchDayZ, killDayZProcesses, findDayZExecutable, validateAndFixDayZPath } from './dayz-launcher';
 import { scanDayZProfiles, cloneDayZProfile, detectProfileDrift, resolveProfilesFolder } from './dayz-profiles';
-import { downloadAndVerifyMods, createModJunctions, cancelDownloadProcess } from './mod-management';
+import { downloadAndVerifyMods, createModJunctions, cancelDownloadProcess, sweepModUpdates, beginJoinPhase } from './mod-management';
 import { pingServer } from './ping-service';
 import { pingServerGameDig, pingServersGameDig, getServerInfoGameDig, clearPingCache } from './gamedig-ping-service';
-import { isSteamInitialized, ensureSteamInitialized, getSteamUserInfo, getSubscribedItems, getSubscribedItemsFast, subscribeToItem, unsubscribeFromItem, getItemDownloadInfo, isModInstalled, getItemInstallInfo, forceDownloadItem, getModSizes, getWorkshopItemDetails, getWorkshopItemDetailsBatch } from './steam-service';
+import { isSteamInitialized, ensureSteamInitialized, getSteamUserInfo, getSubscribedItems, getSubscribedItemsFast, subscribeToItem, unsubscribeFromItem, getItemDownloadInfo, isModInstalled, getItemInstallInfo, forceDownloadItem, getModSizes, getWorkshopItemDetails, getWorkshopItemDetailsBatch, getModUpdateStatus, getModUpdateStatuses } from './steam-service';
 import { discordService, PresenceData } from './discord-service';
+import { getAnonymousId } from './anonymous-id';
 import { getSuspensionState } from './app-suspension';
 import {
   SNAPSHOT_FILENAME,
@@ -27,7 +28,10 @@ import {
   writeSnapshot,
   type SnapshotFs
 } from './snapshot-store';
-import { getActualDayZWorkshopPath } from './platform-utils';
+import { getActualDayZWorkshopPath, findUninstalledDayZFolder } from './platform-utils';
+import { isAllowedExternalUrl } from './external-url';
+import { GAME_EDITIONS, editionOf } from './dayz-install-locator';
+import { discoverLocalServers, queryAddress } from './local-servers/local-server-discovery';
 
 // Every channel below is registered through `handle`, which will not compile
 // without a schema for its arguments — see ./ipc-register for why that is not
@@ -36,6 +40,9 @@ import { z } from 'zod';
 import { handle, NO_ARGS } from './ipc-register';
 import {
   CloneProfileRequestSchema,
+  DayZQueryTargetSchema,
+  DiscoverOptionsSchema,
+  DiscoveryResultSchema,
   ExternalUrlSchema,
   FileDialogOptionsSchema,
   FilesystemPathSchema,
@@ -48,6 +55,8 @@ import {
   PlayerCountSchema,
   PortSchema,
   PresenceDataSchema,
+  QueryAddressResultSchema,
+  GameEditionSchema,
   ServerDataSchema,
   ServerLabelSchema,
   SettingsPayloadSchema,
@@ -59,6 +68,7 @@ import {
 
 // Import environment configuration
 import { getApiUrls } from './config/environment';
+import { setMusicMuted } from './music-mute';
 
 /**
  * Registers all IPC handlers for the main process
@@ -185,22 +195,26 @@ export function registerIPCHandlers(): void {
       modCount: serverData.mods?.length || 0
     });
 
-    const { ip, port, name, password, mods, isPromoted, description, trailerUrl, bannerUrl, discordUrl, websiteUrl } = serverData;
+    const { ip, port, name, password, mods, isPromoted, description, trailerUrl, bannerUrl, logoUrl, coverUrl, galleryUrls, discordUrl, websiteUrl } = serverData;
+    const edition = editionOf(serverData.edition);
     // Server is premium if it's promoted OR has any owner-editable fields filled
     const isPremium = isPromoted === true || 
-      !!(description || trailerUrl || bannerUrl || discordUrl || websiteUrl);
+      !!(description || trailerUrl || bannerUrl || logoUrl || coverUrl || galleryUrls?.length || discordUrl || websiteUrl);
+    let endJoinPhase: (() => void) | undefined;
 
     try {
       // Update Discord: Connecting (with server info for Join button)
       // Premium servers get their name as the main Discord title
       discordService.setConnecting(name || `${ip}:${port}`, ip, port, isPremium);
       
-      console.log('🔍 Finding DayZ executable...');
-      const dayZExecutablePath = await findDayZExecutable();
+      console.log(`🔍 Finding DayZ executable (${edition.id})...`);
+      const dayZExecutablePath = await findDayZExecutable(edition);
       if (!dayZExecutablePath) {
         console.error('❌ DayZ executable not found');
         discordService.setBrowsingServers(); // Reset on error
-        throw new Error('DayZ executable not found. Please set the path in settings.');
+        throw new Error(edition.id === 'experimental'
+          ? 'DayZ Experimental is not installed. Install it through Steam to join this server.'
+          : 'DayZ executable not found. Please set the path in settings.');
       }
       console.log('✅ DayZ executable found:', dayZExecutablePath);
 
@@ -222,19 +236,25 @@ export function registerIPCHandlers(): void {
         discordService.setDownloading(mods.length, undefined, name, ip, port, isPremium);
         
         console.log('⬇️ Starting mod download/verification...');
+        // Tell the background update sweep to stand down: this join needs the Steam
+        // download queue to itself, or the mod it is waiting for queues behind dozens
+        // of unrelated ones.
+        endJoinPhase = beginJoinPhase();
         // Download and verify all mods
-        const workshopRootPath = await downloadAndVerifyMods(mods);
-        console.log('✅ Mods verified, workshop path:', workshopRootPath);
+        const verification = await downloadAndVerifyMods(mods);
+        console.log('✅ Mods verified, workshop path:', verification.workshopRootPath);
 
         console.log('🔗 Creating mod junctions...');
         // Create junctions for all mods in the workshop folder
-        const junctionDir = await createModJunctions(workshopRootPath, mods, dayZExecutablePath);
+        const junctionDir = await createModJunctions(verification, mods, dayZExecutablePath);
         console.log('✅ Junctions created:', junctionDir);
 
         win?.webContents.send('mod-download-status', { status: `Created ${mods.length} mod junctions. Launching DayZ...` });
         
         console.log('🎮 Launching DayZ with mods...');
-        const dayZProcess = await launchDayZ(serverData, junctionDir);
+        // Hand Steam's install folders to the launcher so it does not re-derive the
+        // workshop root from the default library.
+        const dayZProcess = await launchDayZ(serverData, junctionDir, verification);
         console.log('✅ Day(Z) Beans Launchered successfully, PID:', dayZProcess.pid);
         
         // Update Discord: Playing (with server info for Join button)
@@ -263,6 +283,9 @@ export function registerIPCHandlers(): void {
       const win = getMainWindow();
       win?.webContents.send('mod-download-status', { status: `Error: ${(error as Error).message}`, error: true });
       return { success: false, error: (error as Error).message };
+    } finally {
+      // Release the download queue whether the join succeeded, failed or was cancelled.
+      endJoinPhase?.();
     }
   });
 
@@ -351,6 +374,30 @@ export function registerIPCHandlers(): void {
   // Get server info (includes player count) using GameDig
   handle('get-server-info-gamedig', z.tuple([HostSchema, PortSchema, TimeoutMsSchema.optional()]), async (ip, queryPort, timeout) => {
     return await getServerInfoGameDig(ip, queryPort, timeout);
+  });
+
+  // Direct Connect: DayZ servers on this PC and, when the player turns it on, the local
+  // network. Takes no host: see local-server-discovery.ts for what gets scanned.
+  handle('discover-local-servers', z.tuple([DiscoverOptionsSchema]), async (options) => {
+    const result = await discoverLocalServers(options);
+    // Checked on the way out as well: these values come from whatever answered on a port.
+    const checked = DiscoveryResultSchema.safeParse(result);
+    if (!checked.success) {
+      logToFile(`[Direct Connect] Discovery result rejected: ${checked.error.issues[0]?.message}`);
+      return { servers: [], scannedPorts: [], lanScanned: options.lan, tookMs: result.tookMs };
+    }
+    return checked.data;
+  });
+
+  // Direct Connect: the server at one address the player typed (at most six query ports).
+  handle('query-dayz-server', z.tuple([DayZQueryTargetSchema]), async (target) => {
+    const result = await queryAddress(target);
+    const checked = QueryAddressResultSchema.safeParse(result);
+    if (!checked.success) {
+      logToFile(`[Direct Connect] Query result rejected: ${checked.error.issues[0]?.message}`);
+      return { ok: false, reason: 'timeout', triedPorts: [] };
+    }
+    return checked.data;
   });
 
   // Clear ping cache
@@ -497,6 +544,23 @@ export function registerIPCHandlers(): void {
     return await forceDownloadItem(publishedFileId);
   });
 
+  // Freshness for one mod: installed AND not stale AND nothing in flight. The renderer
+  // used to reimplement this from raw state bits and timestamps in three places.
+  // `queryWorkshop: false` answers from Steam's local flags only. A progress poll running
+  // once a second must pass it — the workshop lookup is a network round trip.
+  handle('steam-get-mod-update-status', z.tuple([WorkshopIdSchema, z.boolean().optional()]), async (publishedFileId, queryWorkshop) => {
+    return await getModUpdateStatus(publishedFileId, { queryWorkshop: queryWorkshop !== false });
+  });
+
+  handle('steam-get-mod-update-statuses', z.tuple([z.array(WorkshopIdSchema).max(MAX_WORKSHOP_BATCH)]), async (publishedFileIds) => {
+    return { success: true, statuses: await getModUpdateStatuses(publishedFileIds) };
+  });
+
+  // Check every subscribed mod and carry the updates through. Also runs at startup.
+  handle('mods-sweep-updates', z.tuple([]), async () => {
+    return await sweepModUpdates();
+  });
+
   handle('steam-get-mod-sizes', z.tuple([z.array(WorkshopIdSchema).max(MAX_WORKSHOP_BATCH)]), async (workshopIds) => {
     return await getModSizes(workshopIds);
   });
@@ -511,17 +575,12 @@ export function registerIPCHandlers(): void {
   // a compromised renderer could abuse to run local files or scripts.
   handle('open-external', z.tuple([ExternalUrlSchema]), async (url) => {
     try {
-      let scheme: string;
-      try {
-        scheme = new URL(url).protocol.toLowerCase();
-      } catch {
-        return { success: false, error: 'Malformed URL' };
-      }
-
-      const ALLOWED_SCHEMES = ['http:', 'https:', 'mailto:'];
-      if (!ALLOWED_SCHEMES.includes(scheme)) {
-        console.warn(`🚫 Blocked open-external for disallowed scheme: ${scheme}`);
-        return { success: false, error: `Scheme not allowed: ${scheme}` };
+      // Web/mail links and the Steam Workshop links only (see external-url.ts). Workshop
+      // buttons pass steam://url/... links, which the old http/https/mailto-only list
+      // refused, so every "open in Workshop" did nothing.
+      if (!isAllowedExternalUrl(url)) {
+        logToFile(`[open-external] Blocked: ${url.slice(0, 200)}`);
+        return { success: false, error: 'URL not allowed' };
       }
 
       await shell.openExternal(url);
@@ -571,10 +630,14 @@ export function registerIPCHandlers(): void {
         // Log the current settings path for debugging
         const currentPath = store.get('settings.dayzPath');
         console.log('🔧 Current DayZ path in settings:', currentPath);
+        const leftoverFolder = await findUninstalledDayZFolder();
         return { 
           isInstalled: false, 
-          error: 'DayZ executable not found. Please set the path in settings.',
-          needsConfiguration: true 
+          error: leftoverFolder
+            ? `DayZ is not installed in Steam (only leftover files remain in ${leftoverFolder}).`
+            : 'DayZ executable not found. Please set the path in settings.',
+          needsConfiguration: true,
+          reason: leftoverFolder ? 'uninstalled' : 'not-found',
         };
       }
     } catch (error) {
@@ -586,6 +649,13 @@ export function registerIPCHandlers(): void {
       };
     }
   });
+
+  // Which DayZ clients are installed, as executable paths (null when not found). The
+  // servers page shows its Stable / Experimental switch only when Experimental is here.
+  // One edition per call: the join gate only ever needs Experimental, and a stable
+  // search can fall through to a slow PowerShell scan for nothing.
+  handle('find-dayz-edition', z.tuple([z.enum(['stable', 'experimental'])]), async (edition) =>
+    findDayZExecutable(GAME_EDITIONS[edition]));
 
   // DayZ path verification handler (with specific path)
   handle('verify-dayz-path', z.tuple([FilesystemPathSchema]), async (dayzPath) => {
@@ -719,13 +789,36 @@ export function registerIPCHandlers(): void {
       }
 
       // Save each setting to electron-store
-      if (settings.dayzPath !== undefined) {
+      // An empty path never overwrites a saved one. The renderer starts with '' and syncs
+      // its whole settings object at startup, before detection reports back, so writing
+      // it through erased the path detection had just found. An empty field already
+      // means "detect it" to findDayZExecutable, which falls back to detection whenever
+      // the saved path stops validating.
+      // Clearing is its own flag so the startup sync's '' can never pass for it.
+      if (settings.clearDayzPath) {
+        store.delete('settings.dayzPath');
+        console.log('💾 DayZ path cleared, detection takes over');
+      } else if (typeof settings.dayzPath === 'string' && settings.dayzPath.trim()) {
         store.set('settings.dayzPath', settings.dayzPath);
         console.log('💾 DayZ path saved to electron-store:', settings.dayzPath);
+      }
+      if (typeof settings.dayzExpPath === 'string' && settings.dayzExpPath.trim()) {
+        store.set('settings.dayzExpPath', settings.dayzExpPath);
       }
       
       if (settings.launchParameters !== undefined) {
         store.set('settings.launchParameters', settings.launchParameters);
+      }
+
+      // Read by the splash, which plays before the renderer has its settings
+      if (settings.musicIntro !== undefined) {
+        store.set('settings.musicIntro', settings.musicIntro);
+      }
+      if (settings.musicVolume !== undefined) {
+        store.set('settings.musicVolume', settings.musicVolume);
+      }
+      if (settings.musicMuted !== undefined) {
+        setMusicMuted(settings.musicMuted, 'renderer');
       }
       
       if (settings.profileName !== undefined) {
@@ -955,6 +1048,14 @@ export function registerIPCHandlers(): void {
       console.error('Failed to get store data:', error);
       return null;
     }
+  });
+
+  // The anonymous install id. Owned here rather than in renderer localStorage so it
+  // survives a cache wipe and so the main-process update check can send it too.
+  // The optional argument is the renderer's legacy localStorage id, adopted only when
+  // nothing is stored yet — see anonymous-id.ts.
+  handle('get-anonymous-id', z.tuple([z.string().optional()]), (legacyId) => {
+    return getAnonymousId(legacyId);
   });
 
   handle('deleteStoreData', z.tuple([StoreKeySchema]), (key) => {

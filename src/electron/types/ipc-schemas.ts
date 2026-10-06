@@ -124,8 +124,11 @@ export const ServerModSchema = z.object({
   name: z.string().optional().default('')
 });
 
+export const GameEditionSchema = z.enum(['stable', 'experimental']);
+
 export const ServerDataSchema = z.object({
-  ip: z.string(),
+  // Ends up in `-connect=`: bounded like every other host the main process accepts.
+  ip: HostSchema,
   port: z.number().min(1).max(65535),
   name: z.string().optional(),
   password: z.string().optional(),
@@ -133,9 +136,20 @@ export const ServerDataSchema = z.object({
   description: z.string().optional(),
   trailerUrl: z.string().optional(),
   bannerUrl: z.string().optional(),
+  logoUrl: z.string().optional(),
+  coverUrl: z.string().optional(),
+  galleryUrls: z.array(z.string()).optional(),
   discordUrl: z.string().optional(),
   websiteUrl: z.string().optional(),
-  mods: z.array(ServerModSchema).optional()
+  mods: z.array(ServerModSchema).optional(),
+  /** Which DayZ client the server is for; decides what gets launched. Absent = stable. */
+  edition: GameEditionSchema.optional(),
+  /**
+   * Opaque key of a server on this PC whose non-Workshop mod folders the player chose to
+   * load. Never a path: local-server-discovery.ts holds the folders and only hands them
+   * back for a join to that same server.
+   */
+  localServerKey: z.string().regex(/^[0-9a-f]{32}$/, 'must be a local server key').optional()
 });
 
 export type ServerData = z.infer<typeof ServerDataSchema>;
@@ -347,6 +361,69 @@ export const GameDigTargetSchema = z.object({
 export type GameDigTarget = z.infer<typeof GameDigTargetSchema>;
 
 /**
+ * `discover-local-servers`. Deliberately nothing but a switch: the renderer never names a
+ * host or a port to scan. Targets come from this PC's processes, 127.0.0.1 and the
+ * broadcast addresses of its own private interfaces (local-server-discovery.ts).
+ */
+export const DiscoverOptionsSchema = z.object({ lan: z.boolean() }).strict();
+
+/**
+ * `query-dayz-server`: one address the player typed. The main process picks at most six
+ * query ports itself; `queryPortHint` is the backend's recorded query port, tried first.
+ * IPv4 or a hostname only, length-capped; broadcast and multicast targets are refused
+ * after DNS resolution.
+ */
+export const DayZQueryTargetSchema = z.object({
+  host: HostSchema.regex(/^[A-Za-z0-9.-]+$/, 'must be an IPv4 address or a hostname'),
+  gamePort: PortSchema,
+  queryPortHint: PortSchema.optional()
+}).strict();
+
+const ProbeTextSchema = z.string().max(256);
+
+/** What both Direct Connect channels return per server, checked before it leaves the main process. */
+export const DayZServerProbeSchema = z.object({
+  ip: z.string().max(45),
+  gamePort: PortSchema,
+  queryPort: PortSchema,
+  source: z.enum(['process', 'loopback', 'lan', 'address']),
+  online: z.boolean(),
+  name: ProbeTextSchema,
+  map: ProbeTextSchema,
+  players: PlayerCountSchema,
+  maxPlayers: PlayerCountSchema,
+  version: ProbeTextSchema,
+  appId: z.number().int().nonnegative().nullable(),
+  edition: GameEditionSchema,
+  passwordProtected: z.boolean(),
+  firstPerson: z.boolean(),
+  pingMs: z.number().int().nonnegative().max(60_000).nullable(),
+  mods: z.array(z.object({ workshopId: z.number().int().positive(), name: ProbeTextSchema })).max(255).nullable(),
+  unpublishedMods: z.array(z.object({ name: ProbeTextSchema })).max(255),
+  modsSource: z.enum(['rules', 'process', 'none']),
+  modsComplete: z.boolean(),
+  localServerKey: z.string().regex(/^[0-9a-f]{32}$/).optional()
+});
+
+export type DayZServerProbeData = z.infer<typeof DayZServerProbeSchema>;
+
+export const DiscoveryResultSchema = z.object({
+  servers: z.array(DayZServerProbeSchema).max(128),
+  scannedPorts: z.array(PortSchema).max(64),
+  lanScanned: z.boolean(),
+  tookMs: z.number().nonnegative()
+});
+
+export const QueryAddressResultSchema = z.discriminatedUnion('ok', [
+  z.object({ ok: z.literal(true), server: DayZServerProbeSchema }),
+  z.object({
+    ok: z.literal(false),
+    reason: z.enum(['timeout', 'dns', 'mismatch', 'rejected', 'rate-limited']),
+    triedPorts: z.array(PortSchema).max(8)
+  })
+]);
+
+/**
  * `clone-dayz-profile`.
  *
  * Names become directory names under the profiles folder, so they are restricted
@@ -378,6 +455,13 @@ export type CloneProfileRequest = z.infer<typeof CloneProfileRequestSchema>;
  */
 export const SettingsPayloadSchema = z.object({
   dayzPath: z.string().max(4096).optional(),
+  dayzExpPath: z.string().max(4096).optional(),
+  /** The player emptied the path field: forget the saved path and detect again. */
+  clearDayzPath: z.literal(true).optional(),
+  musicIntro: z.boolean().optional(),
+  musicMenu: z.boolean().optional(),
+  musicVolume: z.number().min(0).max(1).optional(),
+  musicMuted: z.boolean().optional(),
   launchParameters: z.string().max(4096).optional(),
   profileName: z.string().max(64).optional(),
   profilesPath: z.string().max(4096).optional(),

@@ -14,7 +14,51 @@ export interface ServerData {
   name?: string;
   mods?: ServerModData[];
   parameters?: string;
+  password?: string;
+  edition?: 'stable' | 'experimental';
+  /** Opaque key of a server on this PC whose non-Workshop mods the player chose to load. */
+  localServerKey?: string;
 }
+
+/** A DayZ server found by Direct Connect (main: local-servers/local-server-discovery.ts). */
+export interface DayZServerProbe {
+  ip: string;
+  gamePort: number;
+  queryPort: number;
+  /** process: a DayZServer on this PC; loopback: answers on 127.0.0.1; lan; address: typed. */
+  source: 'process' | 'loopback' | 'lan' | 'address';
+  /** False for a DayZServer process that does not answer queries (yet). */
+  online: boolean;
+  name: string;
+  map: string;
+  players: number;
+  maxPlayers: number;
+  version: string;
+  appId: number | null;
+  edition: 'stable' | 'experimental';
+  passwordProtected: boolean;
+  firstPerson: boolean;
+  pingMs: number | null;
+  /** Workshop mods the server needs; null when unknown. */
+  mods: ServerModData[] | null;
+  /** Mods that are not on the Workshop (names only). */
+  unpublishedMods: Array<{ name: string }>;
+  modsSource: 'rules' | 'process' | 'none';
+  modsComplete: boolean;
+  /** Present when the main process can load the unpublished mods from the server's folders. */
+  localServerKey?: string;
+}
+
+export interface LocalServerDiscoveryResult {
+  servers: DayZServerProbe[];
+  scannedPorts: number[];
+  lanScanned: boolean;
+  tookMs: number;
+}
+
+export type DayZServerQueryResult =
+  | { ok: true; server: DayZServerProbe }
+  | { ok: false; reason: 'timeout' | 'dns' | 'mismatch' | 'rejected' | 'rate-limited'; triedPorts: number[] };
 
 // GameDig ping result types
 export interface GameDigPingResult {
@@ -318,6 +362,58 @@ export interface SuspensionAPI {
 /**
  * Main Electron API exposed to renderer process via contextBridge
  */
+/**
+ * Whether a mod on disk is the version the workshop has.
+ * `isUpToDate` is the only field a caller should gate a launch on — it folds in
+ * "installed", "not stale" and "nothing in flight".
+ */
+export interface ModUpdateStatusResponse {
+  success: boolean;
+  workshopId: string;
+  itemState: number;
+  isInstalled: boolean;
+  needsUpdate: boolean;
+  isDownloading: boolean;
+  isUpToDate: boolean;
+  folder: string | null;
+  localTimestamp: number;
+  workshopTimestamp: number;
+  /** Newest workshop version known to need no download (metadata-only edit), or 0. */
+  acknowledgedTimestamp: number;
+  reason:
+    | 'up-to-date'
+    | 'not-installed'
+    | 'folder-missing'
+    | 'steam-flag'
+    | 'timestamp'
+    | 'metadata-only'
+    | 'downloading'
+    | 'steam-unavailable'
+    | 'error';
+  error?: string;
+}
+
+/** Outcome of a full subscribed-mod update sweep. */
+export interface ModUpdateSweepResponse {
+  ran: boolean;
+  checked: number;
+  stale: number;
+  completed: number;
+  stillPending: number;
+  reason?: string;
+}
+
+/** Progress pushed on the `mod-update-sweep` channel while a sweep runs. */
+export interface ModUpdateSweepProgress {
+  phase: 'checking' | 'updating' | 'done' | 'skipped';
+  checked?: number;
+  total?: number;
+  stale?: number;
+  completed?: number;
+  names?: string[];
+  error?: string;
+}
+
 export interface ElectronAPI {
   // Spotlight
   getSpotlightServerId: () => Promise<{ serverId: number | null; joinRequested: boolean }>;
@@ -338,6 +434,8 @@ export interface ElectronAPI {
   pingServersGameDig: (servers: Array<{ ip: string; queryPort: number; serverId: number }>, concurrency?: number, timeout?: number) => Promise<GameDigBatchPingResult[]>;
   getServerInfoGameDig: (ip: string, queryPort: number, timeout?: number) => Promise<GameDigPingResult>;
   clearPingCache: () => Promise<{ success: boolean }>;
+  discoverLocalServers: (options: { lan: boolean }) => Promise<LocalServerDiscoveryResult>;
+  queryDayZServer: (target: { host: string; gamePort: number; queryPortHint?: number }) => Promise<DayZServerQueryResult>;
 
   // Steam Workshop Integration
   isSteamInitialized: () => Promise<boolean>;
@@ -360,6 +458,9 @@ export interface ElectronAPI {
   getWorkshopItemDetailsBatch: (publishedFileIds: string[]) => Promise<WorkshopItemDetailsBatchResponse>;
   isModInstalled: (publishedFileId: string) => Promise<ModInstallStatus>;
   forceDownloadItem: (publishedFileId: string) => Promise<{ success: boolean; downloadStarted?: boolean; error?: string }>;
+  getModUpdateStatus: (publishedFileId: string, queryWorkshop?: boolean) => Promise<ModUpdateStatusResponse>;
+  getModUpdateStatuses: (publishedFileIds: string[]) => Promise<{ success: boolean; statuses: ModUpdateStatusResponse[] }>;
+  sweepModUpdates: () => Promise<ModUpdateSweepResponse>;
   getModSizes: (workshopIds: string[]) => Promise<ModSizesResponse>;
   joinServerWithMods: (serverData: ServerData) => Promise<SteamItemResponse>;
   cancelJoinProcess: () => Promise<{ success: boolean; message?: string; error?: string }>;
@@ -381,6 +482,11 @@ export interface ElectronAPI {
 
   // App Info
   getAppVersion: () => Promise<string>;
+  /**
+   * Anonymous install id, owned by the main process so it survives a renderer cache
+   * wipe. `legacyId` is the old localStorage value, adopted only on first migration.
+   */
+  getAnonymousId: (legacyId?: string) => Promise<string>;
 
   // Store Data
   setStoreData: (key: string, value: any) => Promise<void>;
@@ -420,7 +526,14 @@ export interface ElectronAPI {
     executablePath?: string;
     error?: string;
     needsConfiguration?: boolean;
+    /** Why it was not found: 'uninstalled' when Steam removed the game but left its folder. */
+    reason?: 'uninstalled' | 'not-found';
   }>;
+
+  /** Executable path of each installed DayZ client, null when it is not installed. */
+  findDayZEdition: (edition: 'stable' | 'experimental') => Promise<string | null>;
+  /** Mute flipped from the taskbar thumbnail button or the tray menu; returns an unsubscribe. */
+  onMusicMuteChanged: (callback: (muted: boolean) => void) => () => void;
 
   verifyDayZPath: (dayzPath: string) => Promise<{
     isInstalled: boolean;

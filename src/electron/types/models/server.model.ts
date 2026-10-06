@@ -23,7 +23,10 @@ export interface DayZServer {
   // Owner-editable fields
   description?: string; // Server description
   trailerUrl?: string; // YouTube trailer URL
-  bannerUrl?: string; // Background/banner image URL
+  bannerUrl?: string; // Original single card image; fallback when the slots below are empty
+  logoUrl?: string; // 1:1 logo: list thumbnail and expanded card medallion
+  coverUrl?: string; // 3:1 cover: expanded card hero
+  galleryUrls?: string[]; // 16:9 images for the expanded card carousel, display order
   discordUrl?: string; // Discord server invite link
   websiteUrl?: string; // Server website URL
 }

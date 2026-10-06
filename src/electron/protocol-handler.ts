@@ -24,6 +24,7 @@
 import { app, BrowserWindow } from 'electron';
 import * as path from 'path';
 import { logToFile } from './logger';
+import { sendToApp, wake as wakeFromDeepSleep } from './deep-sleep';
 
 /** Protocol name. Also the prefix every URL handled here must start with. */
 export const PROTOCOL_NAME = 'dayzbeans';
@@ -216,13 +217,15 @@ export function handleProtocolUrl(url: string): void {
     return;
   }
 
+  // A launcher in deep sleep reloads first; sendToApp holds the action until it can listen
+  wakeFromDeepSleep();
   if (mainWindowRef.isMinimized()) {
     mainWindowRef.restore();
   }
   mainWindowRef.show();
   mainWindowRef.focus();
 
-  mainWindowRef.webContents.send('protocol-action', action);
+  sendToApp('protocol-action', action);
 }
 
 /**

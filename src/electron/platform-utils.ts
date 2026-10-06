@@ -11,6 +11,15 @@ import * as os from 'os';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { logToFile } from './logger';
+import { e2eHooks } from './e2e-hooks';
+import {
+  GAME_EDITIONS,
+  GameEdition,
+  PathSeparator,
+  dedupePaths,
+  parseAppManifestInstallDir,
+  parseLibraryFoldersVdf,
+} from './dayz-install-locator';
 
 const execAsync = promisify(exec);
 
@@ -141,22 +150,109 @@ export async function getDayZWorkshopPathForFlatpak(): Promise<string | null> {
   return null;
 }
 
-export async function getActualDayZWorkshopPath(): Promise<string> {
+/**
+ * Every Steam library root Steam knows about, primary first.
+ *
+ * Steam records additional libraries in `steamapps/libraryfolders.vdf` (older clients:
+ * `config/libraryfolders.vdf`). Without reading it we only ever looked in the default
+ * install, so a player with DayZ or its workshop content on a second drive — a very
+ * common Linux setup — got a workshop root that does not exist. Every mod path built
+ * from it then missed, and on Linux the join path went on to delete the correct
+ * symlinks that pre-warming had created from Steam's own install info.
+ *
+ * Both VDF shapes are handled: the current one nests a `"path"` key per entry, the old
+ * one maps an index straight to the path string.
+ */
+export function getSteamLibraryPaths(steamPath?: string): string[] {
+  const primary = steamPath || getDefaultSteamPath();
+  const roots: string[] = [primary];
+
+  const vdfCandidates = [
+    path.join(primary, 'steamapps', 'libraryfolders.vdf'),
+    path.join(primary, 'config', 'libraryfolders.vdf'),
+  ];
+
+  for (const vdf of vdfCandidates) {
+    try {
+      if (!fs.existsSync(vdf)) continue;
+      // Every candidate is then probed per mod by resolveWorkshopRootForMod.
+      roots.push(...parseLibraryFoldersVdf(fs.readFileSync(vdf, 'utf-8'), path.sep as PathSeparator));
+    } catch (error) {
+      logToFile(`[getSteamLibraryPaths] Could not read ${vdf}: ${error}`);
+    }
+  }
+
+  // De-duplicate while preserving order (primary stays first), and drop anything that is
+  // not an absolute path. A relative value is never a Steam library, and path.resolve
+  // would silently turn it into a path under our own working directory.
+  const seen = new Set<string>();
+  return roots.filter(root => {
+    if (!root || !path.isAbsolute(root)) return false;
+    const normalized = path.resolve(root);
+    if (seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
+}
+
+/**
+ * Every plausible DayZ workshop content directory, most likely first.
+ * Includes Flatpak Steam and each library listed in libraryfolders.vdf.
+ */
+export async function getDayZWorkshopPathCandidates(): Promise<string[]> {
+  const candidates: string[] = [];
+
   const installation = await detectSteamInstallation();
-  
   if (installation.type === 'flatpak') {
     const flatpakPath = await getDayZWorkshopPathForFlatpak();
-    if (flatpakPath) return flatpakPath;
+    if (flatpakPath) candidates.push(flatpakPath);
   }
-  
-  return getDayZWorkshopPath();
+
+  for (const library of getSteamLibraryPaths()) {
+    candidates.push(getDayZWorkshopPath(library));
+  }
+
+  // Flatpak content can exist even when the running Steam reports as native
+  // (dual install, or detection falling back), so always keep it as a tail candidate.
+  const flatpakFallback = await getDayZWorkshopPathForFlatpak();
+  if (flatpakFallback) candidates.push(flatpakFallback);
+
+  const seen = new Set<string>();
+  return candidates.filter(candidate => {
+    const normalized = path.resolve(candidate);
+    if (seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
+}
+
+export async function getActualDayZWorkshopPath(): Promise<string> {
+  const candidates = await getDayZWorkshopPathCandidates();
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  // Nothing on disk yet (fresh install, no mods subscribed). Return the primary guess
+  // so callers that create directories still have somewhere sensible to write.
+  return candidates[0] || getDayZWorkshopPath();
+}
+
+/**
+ * The workshop root that actually holds this mod, searching every known library.
+ * Returns null when no library has it. Prefer Steam's own `installInfo.folder` when
+ * you have it — this is the fallback for when the Steam API is unavailable.
+ */
+export async function resolveWorkshopRootForMod(workshopId: string): Promise<string | null> {
+  for (const candidate of await getDayZWorkshopPathCandidates()) {
+    if (fs.existsSync(path.join(candidate, workshopId))) return candidate;
+  }
+  return null;
 }
 
 export async function isModInstalledOnDisk(workshopId: string): Promise<boolean> {
   try {
-    const workshopPath = await getActualDayZWorkshopPath();
-    const modPath = path.join(workshopPath, workshopId);
-    return fs.existsSync(modPath);
+    return (await resolveWorkshopRootForMod(workshopId)) !== null;
   } catch (error) {
     console.error('Error checking mod installation:', error);
     return false;
@@ -165,15 +261,18 @@ export async function isModInstalledOnDisk(workshopId: string): Promise<boolean>
 
 export async function getInstalledModsFromDisk(): Promise<string[]> {
   try {
-    const workshopPath = await getActualDayZWorkshopPath();
-    if (!fs.existsSync(workshopPath)) {
-      return [];
+    const found = new Set<string>();
+
+    for (const workshopPath of await getDayZWorkshopPathCandidates()) {
+      if (!fs.existsSync(workshopPath)) continue;
+
+      const entries = fs.readdirSync(workshopPath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory()) found.add(entry.name);
+      }
     }
-    
-    const entries = fs.readdirSync(workshopPath, { withFileTypes: true });
-    return entries
-      .filter(entry => entry.isDirectory())
-      .map(entry => entry.name);
+
+    return [...found];
   } catch (error) {
     console.error('Error reading workshop folder:', error);
     return [];
@@ -221,6 +320,127 @@ export function getPossibleDayZPaths(): string[] {
   ];
 }
 
+/**
+ * Steam install roots worth reading libraryfolders.vdf from, most authoritative first.
+ * Only roots that exist are returned.
+ */
+async function getSteamRootCandidates(): Promise<string[]> {
+  const roots: string[] = [];
+
+  if (isWindows) {
+    const { installPath } = await readWindowsSteamRegistry();
+    if (installPath) roots.push(installPath);
+  }
+
+  roots.push(getDefaultSteamPath());
+
+  if (isLinux) {
+    const home = getHomeDir();
+    roots.push(
+      path.join(home, '.steam', 'steam'),
+      path.join(home, '.local', 'share', 'Steam'),
+      path.join(home, '.var', 'app', 'com.valvesoftware.Steam', '.local', 'share', 'Steam'),
+      path.join(home, '.var', 'app', 'com.valvesoftware.Steam', '.steam', 'steam'),
+    );
+  }
+
+  return dedupePaths(roots, path.sep as PathSeparator).filter(root => fs.existsSync(root));
+}
+
+/**
+ * Library folders players commonly create by hand. Covers a Steam whose registry entry
+ * and libraryfolders.vdf we could not reach at all; probing a missing drive is cheap.
+ */
+function getConventionalWindowsLibraries(): string[] {
+  if (!isWindows) return [];
+  return ['C:', 'D:', 'E:', 'F:', 'G:', 'H:'].flatMap(drive => [
+    path.join(drive, '\\SteamLibrary'),
+    path.join(drive, '\\Games', 'SteamLibrary'),
+    path.join(drive, '\\Steam'),
+    path.join(drive, '\\Games', 'Steam'),
+  ]);
+}
+
+/** The edition's install folder name from `library`'s app manifest, null when Steam does not list it there. */
+export function readDayZInstallDirName(library: string, edition: GameEdition): string | null {
+  const manifest = path.join(library, 'steamapps', `appmanifest_${edition.appId}.acf`);
+  try {
+    if (!fs.existsSync(manifest)) return null;
+    return parseAppManifestInstallDir(fs.readFileSync(manifest, 'utf-8'));
+  } catch (error) {
+    logToFile(`[DayZ detection] Could not read ${manifest}: ${error}`);
+    return null;
+  }
+}
+
+function dayZDirsInLibraries(libraries: string[], edition: GameEdition): string[] {
+  // A library whose app manifest lists DayZ is where Steam says the game is, so those go
+  // first; the conventional folder in every library follows as a fallback.
+  const fromManifests = libraries.flatMap(library => {
+    const installDir = readDayZInstallDirName(library, edition);
+    return installDir ? [path.join(library, 'steamapps', 'common', installDir)] : [];
+  });
+  const conventional = libraries.map(library => path.join(library, 'steamapps', 'common', edition.defaultInstallDir));
+  return [...fromManifests, ...conventional];
+}
+
+/** Every library of every Steam install we can find, deduplicated. */
+async function getAllSteamLibraries(): Promise<string[]> {
+  return dedupePaths(
+    (await getSteamRootCandidates()).flatMap(root => getSteamLibraryPaths(root)),
+    path.sep as PathSeparator,
+  );
+}
+
+/**
+ * The DayZ folder of a library where Steam no longer has the game installed: no app
+ * manifest and no DayZ_BE.exe, yet the folder is still there. Uninstalling through Steam
+ * leaves exactly this behind, because the launcher's @mod links and DayZ's own crash logs
+ * are files Steam does not own. Lets the "DayZ not found" dialog say "uninstalled" and
+ * offer a reinstall instead of sending the player to a path setting that cannot help.
+ */
+export async function findUninstalledDayZFolder(edition: GameEdition = GAME_EDITIONS.stable): Promise<string | null> {
+  for (const library of await getAllSteamLibraries()) {
+    const steamapps = path.join(library, 'steamapps');
+    const gameDir = path.join(steamapps, 'common', edition.defaultInstallDir);
+    if (fs.existsSync(gameDir)
+        && !fs.existsSync(path.join(gameDir, 'DayZ_BE.exe'))
+        && !fs.existsSync(path.join(steamapps, `appmanifest_${edition.appId}.acf`))) {
+      return gameDir;
+    }
+  }
+  return null;
+}
+
+/**
+ * Every folder that may hold DayZ_BE.exe, most likely first: every Steam library listed
+ * by every Steam install we can find (registry, default paths, Flatpak), then
+ * hand-made library folders, then the historical fixed paths.
+ */
+export async function getDayZInstallDirCandidates(edition: GameEdition = GAME_EDITIONS.stable): Promise<string[]> {
+  const sep = path.sep as PathSeparator;
+  const libraries = await getAllSteamLibraries();
+
+  let candidates = [
+    ...dayZDirsInLibraries(libraries, edition),
+    ...dayZDirsInLibraries(getConventionalWindowsLibraries().filter(library => fs.existsSync(library)), edition),
+    // The historical fixed paths only ever pointed at the stable client
+    ...(edition.id === 'stable' ? getPossibleDayZPaths().map(executable => path.dirname(executable)) : []),
+  ];
+
+  // Last resort on Windows: ask the running steam.exe where it lives. Costs a PowerShell
+  // round trip, so only when nothing above holds the game, and only for stable: most
+  // players have no Experimental, and probing for it would pay that cost every time.
+  if (isWindows && edition.id === 'stable' && !candidates.some(dir => fs.existsSync(path.join(dir, 'DayZ_BE.exe')))) {
+    const fromProcess = await getWindowsSteamPathFromProcess();
+    if (fromProcess) {
+      candidates = [...dayZDirsInLibraries(getSteamLibraryPaths(fromProcess), edition), ...candidates];
+    }
+  }
+
+  return dedupePaths(candidates, sep);
+}
+
 // =============================================================================
 // Icon Utilities
 // =============================================================================
@@ -262,8 +482,10 @@ export function getTrayIconName(): string {
  * Windows uses junctions (mklink /J), Linux/Mac use symlinks
  */
 export async function createDirectoryLink(targetPath: string, linkPath: string): Promise<void> {
-  // Remove existing link if present
-  if (fs.existsSync(linkPath)) {
+  // Remove existing link if present. lstat-based, not existsSync: a symlink or junction
+  // whose target is gone still occupies the name, and symlink()/mklink would fail with
+  // EEXIST if we skipped the removal below.
+  if (existsOrLinkSync(linkPath)) {
     const stats = fs.lstatSync(linkPath);
     if (stats.isSymbolicLink()) {
       fs.unlinkSync(linkPath);
@@ -273,8 +495,13 @@ export async function createDirectoryLink(targetPath: string, linkPath: string):
   }
   
   if (isWindows) {
-    // Windows: Use cmd mklink /J for directory junctions (no admin required)
-    await execAsync(`cmd /c mklink /J "${linkPath}" "${targetPath}"`);
+    // Windows: a junction, which needs no admin rights — same as `mklink /J`, which this
+    // used to shell out to. Going through cmd meant the mod name was interpreted by the
+    // shell: cmd expands %VAR% pairs even inside double quotes, so a mod titled
+    // "50%-50% Loot" had "%-50%" replaced with nothing and the junction was created under
+    // a different name than the one passed to -mod=. The game then loaded no mod at all.
+    // fs.symlink takes the path as data, so no name can be mangled or injected.
+    await fs.promises.symlink(targetPath, linkPath, 'junction');
   } else {
     // Linux/Mac: Use native symlinks
     await fs.promises.symlink(targetPath, linkPath, 'dir');
@@ -412,6 +639,9 @@ function pidExists(pid: number): boolean {
 }
 
 export async function isSteamRunning(): Promise<boolean> {
+  if (e2eHooks?.fakes.isSteamRunning) {
+    return e2eHooks.fakes.isSteamRunning();
+  }
   if (isWindows) {
     // 1. Registry ActiveProcess PID — authoritative, locale-proof, no shell needed
     //    beyond one `reg query`, and unaffected by tasklist policy restrictions.
@@ -515,6 +745,9 @@ async function getWindowsSteamPathFromProcess(): Promise<string | null> {
 }
 
 export async function detectSteamInstallation(): Promise<SteamInstallation> {
+  if (e2eHooks?.fakes.detectSteamInstallation) {
+    return (await e2eHooks.fakes.detectSteamInstallation()) as SteamInstallation;
+  }
   if (isWindows || isMac) {
     // Check if Steam is installed first
     const { installed, path: installPath } = await isSteamInstalled();
@@ -714,6 +947,9 @@ export async function killProcess(processName: string): Promise<boolean> {
  * Kill all DayZ-related processes
  */
 export async function killAllDayZProcesses(): Promise<void> {
+  if (e2eHooks?.fakes.killAllDayZProcesses) {
+    return e2eHooks.fakes.killAllDayZProcesses();
+  }
   const processes = getDayZProcessNames();
   await Promise.all(processes.map(p => killProcess(p)));
 }
@@ -724,6 +960,9 @@ export async function killAllDayZProcesses(): Promise<void> {
  * false positives from the launcher itself (which contains "DayZ" in its path)
  */
 export async function isDayZRunning(): Promise<boolean> {
+  if (e2eHooks?.fakes.isDayZRunning) {
+    return e2eHooks.fakes.isDayZRunning();
+  }
   if (isWindows) {
     const processes = getDayZProcessNames();
     for (const processName of processes) {
@@ -946,10 +1185,56 @@ export function getProtonLaunchCommand(
  * IMPORTANT: This function must be used consistently everywhere mod names
  * are used for file paths (junctions) AND launch arguments.
  */
+/**
+ * How much of the mod title a Windows junction name may carry.
+ *
+ * The full path the game opens is `<DayZ root>\!dzbl\@<name>_<id>\addons\....pbo`, and
+ * Windows still enforces MAX_PATH (260) for most callers. Capping the readable part keeps
+ * that bounded no matter how verbose a workshop title is.
+ */
+export const MAX_MOD_LINK_NAME_LENGTH = 64;
+
+/**
+ * Build the link name for a mod: readable title plus the workshop id.
+ *
+ * The id is not decoration — it is what makes the name unique. Naming junctions by title
+ * alone collided, and the DayZ workshop is full of reuploads sharing a title: a server
+ * requiring two mods both called "Trader" produced one junction, created twice, and one
+ * of the two mods never loaded. The title stays in front of it so a player (or a support
+ * thread) can still read the folder listing.
+ */
+export function buildModLinkName(modName: string, workshopId: string | number): string {
+  const readable = sanitizeModName(modName || '')
+    .slice(0, MAX_MOD_LINK_NAME_LENGTH)
+    // Truncation can leave a trailing space or dot, both of which Windows silently strips
+    // from a directory name — which would make the name on disk differ from the name we
+    // pass to -mod=.
+    .replace(/[.\s]+$/, '')
+    .trim();
+
+  return `@${readable || 'Mod'}_${workshopId}`;
+}
+
+/**
+ * Recover the workshop id from a link name produced by buildModLinkName.
+ * Returns null for a name that does not carry one (a link from the old title-only
+ * scheme, or something a player put in the folder themselves).
+ */
+export function parseWorkshopIdFromLinkName(linkName: string): string | null {
+  const match = /_(\d+)$/.exec(linkName);
+  return match ? match[1] : null;
+}
+
 export function sanitizeModName(modName: string): string {
   return modName
     .replace(/:/g, '-')           // Replace colons with hyphens
     .replace(/[<>"/\\|?*]/g, '')  // Remove other invalid characters
+    // DayZ separates the -mod= list with semicolons, so a semicolon inside a mod name
+    // split that one entry into two names that match nothing and the mod silently failed
+    // to load. Percent signs used to be eaten by cmd's variable expansion on the way to
+    // mklink; that path is gone, but they stay out of link names so a name can never be
+    // reinterpreted by a shell again.
+    .replace(/[;%]/g, '-')
     .trim();
 }
 
@@ -973,6 +1258,34 @@ export function normalizePath(filePath: string): string {
 export async function pathExists(filePath: string): Promise<boolean> {
   try {
     await fs.promises.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check whether a path is occupied, INCLUDING by a dangling symlink.
+ *
+ * `pathExists` uses fs.access, which follows the link — a symlink whose target is gone
+ * reads back as "does not exist". Every caller that then tried to create the link got
+ * EEXIST from the kernel and logged a warning, so a broken `@workshopId` link was never
+ * repaired in-session: the mod silently failed to load for the rest of the run. lstat
+ * does not follow, so this answers the question the link-creation code actually asks.
+ */
+export async function existsOrLink(filePath: string): Promise<boolean> {
+  try {
+    await fs.promises.lstat(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Synchronous counterpart to existsOrLink, for the sync link-creation path. */
+export function existsOrLinkSync(filePath: string): boolean {
+  try {
+    fs.lstatSync(filePath);
     return true;
   } catch {
     return false;

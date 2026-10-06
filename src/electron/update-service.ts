@@ -6,6 +6,8 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { spawn } from 'child_process';
 import { getApiUrls } from './config/environment';
+import { BUILD_ENV } from './config/build-env';
+import { peekAnonymousId } from './anonymous-id';
 
 // Check if we're in development mode
 const args = process.argv.slice(1);
@@ -136,7 +138,20 @@ function makeRequest(url: string): Promise<string> {
 /**
  * Check for updates from the backend API
  */
+/**
+ * A staging build never updates itself. Its version comes from the newest tag on dev,
+ * which trails master, while staging's database is a copy of production's and lists
+ * the production releases. Every staging build therefore looked out of date, and the
+ * auto-update replaced it with the production binary on its first launch.
+ */
+const UPDATES_DISABLED_REASON = BUILD_ENV === 'production' ? null : 'Updates are disabled in staging builds';
+
 export async function checkForUpdates(): Promise<UpdateCheckResult> {
+  if (UPDATES_DISABLED_REASON) {
+    console.log(`🔄 ${UPDATES_DISABLED_REASON}`);
+    return { updateAvailable: false, currentVersion: getCurrentVersion(), error: UPDATES_DISABLED_REASON };
+  }
+
   if (isCheckingForUpdates) {
     return {
       updateAvailable: false,
@@ -158,10 +173,31 @@ export async function checkForUpdates(): Promise<UpdateCheckResult> {
       : process.platform === 'linux'
         ? 'linux'
         : 'mac';
-    const url = `${apiUrls.apiUrl}/launcher/latest/${platform}/compare/${currentVersion}`;
-    
-    console.log(`🔄 Update check URL: ${url}`);
-    
+    // The id goes with the request because this is the only call every launcher makes
+    // on every start. Activity was previously recorded from the server list alone, so a
+    // user who opened the launcher and joined a favourite without browsing counted as
+    // nobody, and the platform breakdown had no platform to record. The backend tracks
+    // activity only when this parameter is present.
+    //
+    // Peek, never create: on the upgrade launch this runs before Angular has handed
+    // over the legacy localStorage id, and creating one here would orphan it (see
+    // peekAnonymousId). That launch goes out without an id, as every launch did before.
+    let anonymousId: string | null = null;
+    try {
+      anonymousId = peekAnonymousId();
+    } catch (error) {
+      // A corrupt config must not cost the user their update check.
+      console.warn('🔄 Anonymous ID unavailable, checking for updates without it:', error);
+    }
+    const baseUrl = `${apiUrls.apiUrl}/launcher/latest/${platform}/compare/${currentVersion}`;
+    const url = anonymousId
+      ? `${baseUrl}?anonymousId=${encodeURIComponent(anonymousId)}`
+      : baseUrl;
+
+    // Logged without the query string: the id is anonymous, but it does not belong
+    // in a log file users paste into support threads.
+    console.log(`🔄 Update check URL: ${baseUrl}`);
+
     const response = await makeRequest(url);
     const versionInfo: LauncherVersionDTO = JSON.parse(response);
     
@@ -473,6 +509,12 @@ function calculateChecksum(filePath: string): Promise<string> {
  * Download and install update automatically
  */
 export async function downloadAndInstallUpdate(updateInfo: UpdateCheckResult): Promise<boolean> {
+  // The renderer can hand any manifest to this; a staging build still refuses to update
+  if (UPDATES_DISABLED_REASON) {
+    console.log(`🔄 ${UPDATES_DISABLED_REASON}`);
+    return false;
+  }
+
   if (!updateInfo.downloadUrl) {
     console.error('❌ No download URL provided');
     return false;

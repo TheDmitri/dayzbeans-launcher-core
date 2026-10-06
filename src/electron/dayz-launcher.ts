@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, SpawnOptions } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import Store from 'electron-store';
@@ -8,13 +8,17 @@ import {
   isWindows,
   isLinux,
   killAllDayZProcesses,
-  getPossibleDayZPaths,
+  getDayZInstallDirCandidates,
   getLaunchCommand,
   pathExists,
-  sanitizeModName,
+  readDayZInstallDirName,
 } from './platform-utils';
-import { createWorkshopIdSymlinks } from './mod-management';
+import { dayZFoldersUnder, PathSeparator, GAME_EDITIONS, GameEdition, editionOf } from './dayz-install-locator';
+import { logToFile } from './logger';
+import { createWorkshopIdSymlinks, verifyModLinks, getWindowsModLinkNames, linkLocalServerMods, type ModVerificationResult } from './mod-management';
+import { resolveLocalServerMods } from './local-servers/local-server-discovery';
 import { recordProfileSnapshot } from './dayz-profiles';
+import { e2eHooks } from './e2e-hooks';
 
 const store = new Store();
 
@@ -93,14 +97,95 @@ export async function killDayZProcesses(): Promise<void> {
 }
 
 /**
- * Launches DayZ client with specified server and mods
+ * Refuse to launch unless every required mod is present and current.
+ *
+ * DayZ reports neither problem usefully: a `-mod=@123` entry whose link is dangling is
+ * loaded as nothing, and a stale mod is refused by the server with a message that tells
+ * the player nothing about which mod or why. Both used to be reachable — the download
+ * wait returned as soon as Steam said "installed", which is already true of a mod that
+ * merely needs an update. Failing here, by name, costs the player a retry instead of a
+ * confusing rejection at the connect screen.
+ *
+ * `skipped` are the mods the download phase could not subscribe to. It skips them so the
+ * other mods still download (a retry then only waits on those), but the server needs
+ * them too, so they fail the launch here under their real cause: without this check they
+ * surfaced as missing links, blamed on Steam not running.
  */
-export async function launchDayZ(serverData: any, _junctionDir: string): Promise<any> {
+async function assertModsReadyToLaunch(
+  mods: Array<{ workshopId: number; name: string }>,
+  dayZExecutablePath: string,
+  skipped: string[] = []
+): Promise<void> {
+  if (skipped.length > 0) {
+    console.error('❌ Mods Steam would not subscribe to:', skipped);
+    throw new Error(
+      `Steam did not subscribe to ${skipped.length} required mod(s): ${skipped.join(', ')}. ` +
+      `Subscribe on the Steam Workshop and try again. A mod removed from the Workshop or made private blocks this server until it changes its mod list.`
+    );
+  }
+
+  const { ok, broken } = await verifyModLinks(mods, dayZExecutablePath);
+  if (!ok) {
+    const names = broken.map(b => b.name || b.workshopId).join(', ');
+    console.error('❌ Mod links missing or broken before launch:', broken);
+    throw new Error(
+      `${broken.length} mod link(s) could not be created: ${names}. ` +
+      `Check that Steam is running and the mods are installed, then try again.`
+    );
+  }
+
+  const { getModUpdateStatuses } = await import('./steam-service');
+  const statuses = await getModUpdateStatuses(mods.map(m => m.workshopId.toString()), { queryWorkshop: false });
+
+  // 'steam-unavailable' is not evidence of staleness — do not block a launch on a Steam
+  // API that went away after the download phase already succeeded.
+  const stale = statuses.filter(status => status.success && !status.isUpToDate);
+
+  if (stale.length > 0) {
+    const names = stale
+      .map(status => mods.find(m => m.workshopId.toString() === status.workshopId)?.name || status.workshopId)
+      .join(', ');
+    console.error('❌ Mods still not current before launch:', stale.map(s => `${s.workshopId}:${s.reason}`));
+    throw new Error(
+      `${stale.length} mod(s) are still downloading or out of date: ${names}. ` +
+      `Wait for Steam to finish and try again.`
+    );
+  }
+
+  console.log(`✅ Pre-launch check passed: ${mods.length} mods linked and current`);
+}
+
+/**
+ * Spawns the game (or `steam -applaunch`). The e2e suite replaces it with a fake that
+ * records the command line instead of starting DayZ (see e2e-hooks.ts).
+ */
+function spawnGame(command: string, args: string[], options: SpawnOptions): ChildProcess {
+  if (e2eHooks?.fakes.spawnGame) {
+    return e2eHooks.fakes.spawnGame({ command, args, cwd: options.cwd?.toString() }) as ChildProcess;
+  }
+  return spawn(command, args, options);
+}
+
+/**
+ * Launches DayZ client with specified server and mods
+ *
+ * `verification` carries the install folders Steam reported during the download phase.
+ * This function used to ignore it and re-derive the workshop root from the default Steam
+ * install, which is wrong for anyone whose library lives elsewhere.
+ */
+export async function launchDayZ(
+  serverData: any,
+  _junctionDir: string,
+  verification?: ModVerificationResult
+): Promise<any> {
   const { ip, port, password } = serverData;
-  const dayZExecutablePath = await findDayZExecutable();
+  const edition = editionOf(serverData.edition);
+  const dayZExecutablePath = await findDayZExecutable(edition);
 
   if (!dayZExecutablePath) {
-    throw new Error('DayZ executable not found. Please set the path in settings.');
+    throw new Error(edition.id === 'experimental'
+      ? 'DayZ Experimental is not installed. Install it through Steam to join this server.'
+      : 'DayZ executable not found. Please set the path in settings.');
   }
 
   // Kill any existing DayZ processes before launching (Windows only)
@@ -122,30 +207,56 @@ export async function launchDayZ(serverData: any, _junctionDir: string): Promise
     `-port=${port}`,
   ];
 
+  const modsWithIds: Array<{ workshopId: number; name: string }> = (serverData.mods || []).map((mod: any) => ({
+    workshopId: mod.workshopId || mod.steamWorkshopId,
+    name: mod.name,
+  }));
+
+  const modEntries: string[] = [];
+
   if (serverData.mods && serverData.mods.length > 0) {
     let modList: string;
     
     if (isLinux) {
       // Linux: Use @workshopId format (symlinks created directly in DayZ folder)
-      modList = serverData.mods
-        .map((mod: any) => `@${mod.workshopId || mod.steamWorkshopId}`)
+      modList = modsWithIds
+        .map(mod => `@${mod.workshopId}`)
         .join(';');
       
-      // Create @workshopid symlinks directly in DayZ folder
-      const { getActualDayZWorkshopPath } = await import('./platform-utils');
-      const workshopPath = await getActualDayZWorkshopPath();
-      const modsWithIds = serverData.mods.map((mod: any) => ({
-        workshopId: mod.workshopId || mod.steamWorkshopId,
-        name: mod.name
-      }));
-      await createWorkshopIdSymlinks(workshopPath, modsWithIds, dayZExecutablePath);
+      // Create @workshopid symlinks directly in DayZ folder. Prefer the folders Steam
+      // reported during verification; only fall back to probing the libraries when this
+      // is a launch that never went through the download phase.
+      let workshopPath = verification?.workshopRootPath;
+      if (!workshopPath) {
+        const { getActualDayZWorkshopPath } = await import('./platform-utils');
+        workshopPath = await getActualDayZWorkshopPath();
+      }
+
+      await createWorkshopIdSymlinks(workshopPath, modsWithIds, dayZExecutablePath, verification?.folders);
     } else {
-      // Windows: Use @SanitizedModName format (junctions in !dzbl folder)
-      modList = serverData.mods
-        .map((mod: any) => `!dzbl\\@${sanitizeModName(mod.name)}`)
+      // Windows: junctions in the !dzbl folder, named "@<title>_<workshopId>". The names
+      // are read back from disk by workshop id rather than rebuilt from the title here —
+      // the junctions were created moments ago by createModJunctions, and a -mod= entry
+      // naming a folder that does not exist loads no mod and reports nothing.
+      const linkNames = await getWindowsModLinkNames(modsWithIds, dayZExecutablePath);
+      modList = modsWithIds
+        .map(mod => `!dzbl\\${linkNames.get(mod.workshopId.toString())}`)
         .join(';');
     }
     
+    modEntries.push(modList);
+  }
+
+  // Mods of a server on this PC that are not on the Workshop, when the player chose to
+  // load them. The request only names the server; the folders come from the discovery
+  // module, which refuses a key for any other server.
+  if (typeof serverData.localServerKey === 'string' && serverData.localServerKey) {
+    const folders = await resolveLocalServerMods(serverData.localServerKey, ip, port);
+    modEntries.push(...await linkLocalServerMods(folders, dayZExecutablePath));
+  }
+
+  if (modEntries.length > 0) {
+    const modList = modEntries.join(';');
     args.push(`-mod=${modList}`);
     console.log(`Adding mods: ${modList}`);
   }
@@ -215,6 +326,12 @@ export async function launchDayZ(serverData: any, _junctionDir: string): Promise
   // the next launch — the drift check compares against this snapshot and offers to follow it.
   await recordProfileSnapshot();
 
+  // Last gate before the game starts. Everything above is preparation; this is the only
+  // place that confirms the preparation worked.
+  if (modsWithIds.length > 0) {
+    await assertModsReadyToLaunch(modsWithIds, dayZExecutablePath, verification?.skipped);
+  }
+
   console.log(`Launching DayZ: ${dayZExecutablePath}`);
   console.log(`Arguments: ${redactArgsForLog(args)}`);
 
@@ -223,7 +340,7 @@ export async function launchDayZ(serverData: any, _junctionDir: string): Promise
   if (isLinux) {
     // On Linux, use Steam to launch DayZ with Proton
     // Steam handles the Wine/Proton environment setup
-    const dayzAppId = '221100';
+    const dayzAppId = edition.appId;
     
     console.log(`🐧 Linux detected - launching via Steam with Proton`);
     
@@ -269,7 +386,7 @@ export async function launchDayZ(serverData: any, _junctionDir: string): Promise
       const flatpakArgs = ['flatpak', 'run', 'com.valvesoftware.Steam', ...steamArgs];
       console.log('DEBUG: Full command:', 'flatpak-spawn', redactArgsForLog(['--host', ...forwardedEnv, ...flatpakArgs]));
       
-      dayZProcess = spawn(
+      dayZProcess = spawnGame(
         'flatpak-spawn',
         ['--host', ...forwardedEnv, ...flatpakArgs],
         {
@@ -279,7 +396,7 @@ export async function launchDayZ(serverData: any, _junctionDir: string): Promise
       );
     } else {
       console.log('🔧 Launching DayZ via native Steam (steam -applaunch ...)');
-      dayZProcess = spawn('steam', steamArgs, {
+      dayZProcess = spawnGame('steam', steamArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: true
       });
@@ -301,7 +418,8 @@ export async function launchDayZ(serverData: any, _junctionDir: string): Promise
     // On Linux, quit the launcher after a short delay to release the steamworks.js app ID lock
     // This is required for BOTH Flatpak and native Steam because steamworks.js locks the app ID
     console.log('🐧 Quitting launcher in 2 seconds to release app ID lock...');
-    setTimeout(() => {
+    // Not under e2e: the suite asserts on the launcher after the launch
+    if (!e2eHooks) setTimeout(() => {
       console.log('👋 Goodbye! DayZ should be launching now.');
       const { app } = require('electron');
       app.quit();
@@ -309,7 +427,7 @@ export async function launchDayZ(serverData: any, _junctionDir: string): Promise
 
   } else {
     // Windows - direct execution
-    dayZProcess = spawn(dayZExecutablePath, args, {
+    dayZProcess = spawnGame(dayZExecutablePath, args, {
       cwd: dayzRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true
@@ -327,7 +445,10 @@ export async function launchDayZ(serverData: any, _junctionDir: string): Promise
  * Validates and auto-fixes the DayZ path setting
  * Returns the corrected path if fixable, null if unfixable
  */
-export async function validateAndFixDayZPath(customPath: string): Promise<{ valid: boolean; correctedPath?: string; error?: string }> {
+export async function validateAndFixDayZPath(
+  customPath: string,
+  edition: GameEdition = GAME_EDITIONS.stable
+): Promise<{ valid: boolean; correctedPath?: string; error?: string }> {
   if (!customPath || typeof customPath !== 'string') {
     return { valid: false, error: 'No path provided' };
   }
@@ -372,13 +493,25 @@ export async function validateAndFixDayZPath(customPath: string): Promise<{ vali
     };
   }
   
-  // Case 2: User pointed to a directory
-  const executablePath = path.join(customPath, 'DayZ_BE.exe');
-  if (await pathExists(executablePath)) {
-    return { valid: true, correctedPath: customPath };
+  // Case 2: User pointed to a directory: the DayZ folder itself, or a library root /
+  // steamapps / common folder above it (see dayZFoldersUnder).
+  const installDir = await readInstallDirFromManifest(customPath, edition);
+  for (const dir of dayZFoldersUnder(customPath, path.sep as PathSeparator, installDir ?? edition.defaultInstallDir)) {
+    if (await pathExists(path.join(dir, 'DayZ_BE.exe'))) {
+      return { valid: true, correctedPath: dir };
+    }
   }
   
   return { valid: false, error: `DayZ_BE.exe not found in: ${customPath}` };
+}
+
+/** The DayZ folder name from the app manifest, when `dir` is a library root, its steamapps or steamapps/common. */
+async function readInstallDirFromManifest(dir: string, edition: GameEdition): Promise<string | null> {
+  for (const library of [dir, path.join(dir, '..'), path.join(dir, '..', '..')]) {
+    const installDir = readDayZInstallDirName(library, edition);
+    if (installDir) return installDir;
+  }
+  return null;
 }
 
 /**
@@ -386,53 +519,53 @@ export async function validateAndFixDayZPath(customPath: string): Promise<{ vali
  * Uses platform-specific paths for Windows and Linux
  * Auto-fixes invalid paths when possible
  */
-export async function findDayZExecutable(): Promise<string | null> {
+export async function findDayZExecutable(edition: GameEdition = GAME_EDITIONS.stable): Promise<string | null> {
   // 1. Check settings first
-  const customPath = store.get('settings.dayzPath');
+  const customPath = store.get(edition.settingsKey);
   const hasUserPath = !!(customPath && typeof customPath === 'string' && customPath.trim());
   if (customPath && typeof customPath === 'string') {
-    const validation = await validateAndFixDayZPath(customPath);
+    const validation = await validateAndFixDayZPath(customPath, edition);
     
     if (validation.valid && validation.correctedPath) {
       // If the path was corrected (e.g., wrong exe → directory), save the fix
       if (validation.correctedPath !== customPath) {
         console.log(`🔧 Auto-correcting DayZ path from "${customPath}" to "${validation.correctedPath}"`);
-        store.set('settings.dayzPath', validation.correctedPath);
+        store.set(edition.settingsKey, validation.correctedPath);
       }
       
       const executablePath = path.join(validation.correctedPath, 'DayZ_BE.exe');
-      console.log(`✅ DayZ executable found at: ${executablePath}`);
+      logToFile(`[DayZ detection${edition.id === 'experimental' ? ' (Experimental)' : ''}] Using saved path: ${executablePath}`);
       return executablePath;
     } else {
       // Do NOT delete the saved path here: validation can fail transiently (drive not
       // mounted yet, path temporarily unreachable), and wiping it would force the user
       // to reconfigure. Keep it and fall through to default-location detection; the user
       // can correct it explicitly in settings if it is genuinely wrong.
-      console.log(`❌ Saved DayZ path failed validation (keeping it): ${validation.error}`);
+      logToFile(`[DayZ detection${edition.id === 'experimental' ? ' (Experimental)' : ''}] Saved path failed validation (keeping it): ${validation.error}`);
     }
   }
 
-  // 2. Fallback to platform-specific default locations
-  const possiblePaths = getPossibleDayZPaths();
-  console.log(`🔍 Searching for DayZ in ${possiblePaths.length} locations...`);
+  // 2. Ask Steam: every library it knows about, then the usual folders
+  const candidateDirs = await getDayZInstallDirCandidates(edition);
 
-  for (const execPath of possiblePaths) {
+  for (const detectedDir of candidateDirs) {
+    const execPath = path.join(detectedDir, 'DayZ_BE.exe');
     if (await pathExists(execPath)) {
-      console.log(`✅ DayZ found at: ${execPath}`);
-      const detectedDir = path.dirname(execPath);
+      logToFile(`[DayZ detection${edition.id === 'experimental' ? ' (Experimental)' : ''}] Found at: ${execPath}`);
       // Only persist an auto-detected path when the user never set one. Overwriting an
       // explicit setting turned a transient validation failure (unmounted drive, slow
       // network share) into a permanent silent change of the user's configured install.
       if (!hasUserPath) {
-        store.set('settings.dayzPath', detectedDir);
-        console.log(`💾 Saved auto-detected DayZ path: ${detectedDir}`);
+        store.set(edition.settingsKey, detectedDir);
       } else {
-        console.log(`ℹ️ Using detected path for this launch only; keeping user setting: ${customPath}`);
+        logToFile(`[DayZ detection${edition.id === 'experimental' ? ' (Experimental)' : ''}] Using detected path for this launch only; keeping user setting: ${customPath}`);
       }
       return execPath;
     }
   }
   
-  console.log('❌ DayZ executable not found in any default location');
+  // Listed so a support thread shows where we looked; on a packaged Windows build only
+  // app-debug.log survives, console output goes nowhere.
+  logToFile(`[DayZ detection${edition.id === 'experimental' ? ' (Experimental)' : ''}] Not found. Looked in:\n  ${candidateDirs.join('\n  ')}`);
   return null;
 }

@@ -45,15 +45,24 @@ log or Wireshark — that is the point of publishing it.
 
 | Host | Purpose |
 |------|---------|
-| `api.dayzbeanslauncher.com` | Server list, server details, launcher version check |
+| `api.dayzbeanslauncher.com` | Server list, server details, launcher version check; the referral contest page (see below) |
 | `download.dayzbeanslauncher.com` | Downloading launcher updates |
 | `glitchtip.dayzbeanslauncher.com` | Crash reports (opt-out, see below) |
 | `steamcommunity.com` | Steam Workshop mod metadata |
 | `discord.com` | Discord Rich Presence ("Playing on …") |
 | Game servers you interact with | Direct A2S/query packets to fetch live player counts and ping |
+| Your local network (Direct Connect, opt-in) | A2S query broadcast on the DayZ query ports, only while **Scan local network** is on |
 
 Local-only IPC (never leaves your machine): the Steam client, and the Discord
 desktop client for Rich Presence.
+
+**Referral contests.** Only when you open a contest page (Halloween 2026: 5 October to
+7 November), the launcher sends the backend your launcher's random install id and the
+SteamID64 of the Steam account signed in on this computer, in the body of an HTTPS request
+(never in a URL). The backend does not store the SteamID64: it keeps a keyed hash of it
+(HMAC-SHA256 with a server-side secret), used only to make sure one Steam account counts
+once, and deletes contest data three months after the prizes are handed out. Not opening
+the contest page means none of this is sent.
 
 **There is no telemetry endpoint beyond GlitchTip**, and GlitchTip receives crash
 reports only — stack traces, launcher version, OS version. Not behaviour, not
@@ -75,6 +84,7 @@ sent and no connection to GlitchTip is opened.
 | Steam `steamapps` / Workshop content folder | read | Detect which mods you already have and how large they are |
 | `%APPDATA%/Day(Z) Beans Launcher` (or the platform equivalent, `app.getPath('userData')`) | read, write | Settings, cache, and `app-debug.log` / `protocol-debug.log` |
 | A folder you pick yourself via the file dialog | read | Only when you use "Browse" to point the launcher at your DayZ install |
+| A DayZ server running on this PC (Direct Connect) | read | Its `serverDZ.cfg` and the `meta.cpp` / `mod.cpp` of the mod folders on its command line, to show the server's name and required mods. A mod that is not on the Workshop is linked into the `!dzbl` folder only when you choose **Load local mods** |
 
 The mod junctions and symlinks the launcher creates are the standard mechanism
 DayZ uses to load Workshop mods. They point into your existing Steam Workshop
@@ -92,6 +102,7 @@ your user profile, browser storage, or other games.
 | `DayZ_x64.exe` (or `steam -applaunch`) | You click Join or Play |
 | Steam client (`steam.exe`, `flatpak run com.valvesoftware.Steam`, `open -a Steam`) | Steam is required and not running |
 | `ping` | Measuring latency to a game server |
+| `tasklist`, and PowerShell `Get-CimInstance Win32_Process` filtered to `DayZServer*` (Windows; Linux reads `/proc`) | Direct Connect looking for DayZ servers on this PC. Only processes named `DayZServer…` are read, for their command line |
 | The launcher's own downloaded installer (`/S`) | You accept an update |
 
 `kill-dayz-processes` terminates DayZ, and only DayZ. It exists because DayZ
@@ -122,6 +133,7 @@ drifts from the code, so it cannot quietly fall out of date.
 - `kill-dayz-processes` — terminate hung DayZ processes
 - `verify-dayz-installation` — locate `DayZ_x64.exe`
 - `verify-dayz-path` — check that a folder you selected really is a DayZ install
+- `find-dayz-edition` — locate the install of one DayZ edition (stable or Experimental), so an Experimental server is only joined with the Experimental client
 - `get-spotlight-server-id` — read and clear a pending `dayz://` join request
 
 ### Servers and pings
@@ -131,6 +143,14 @@ drifts from the code, so it cannot quietly fall out of date.
 - `ping-servers-gamedig` — game-protocol query of many servers
 - `get-server-info-gamedig` — live details for one server
 - `clear-ping-cache` — drop cached latency results
+
+Direct Connect, for servers the public list does not show:
+
+- `discover-local-servers` — find DayZ servers running on this PC (see *Processes it
+  starts* and *Filesystem access* below) by querying the DayZ ports on `127.0.0.1`, and,
+  only when you turn on **Scan local network**, by a query broadcast to your local
+  network. Takes no address from the interface.
+- `query-dayz-server` — query the one address you typed, on at most six ports
 
 ### Mods (Steam Workshop)
 
@@ -153,6 +173,8 @@ drifts from the code, so it cannot quietly fall out of date.
 - `steam-get-mod-sizes` — sizes for a set of mods
 - `steam-get-workshop-item-details` — Workshop metadata for a mod
 - `steam-get-workshop-items-batch` — Workshop metadata for many mods
+- `steam-get-mod-update-status` / `steam-get-mod-update-statuses` — whether installed mods are behind their Workshop version
+- `mods-sweep-updates` — check every subscribed mod and ask Steam to update the outdated ones (also runs at startup)
 
 ### Settings and storage
 
@@ -161,6 +183,9 @@ drifts from the code, so it cannot quietly fall out of date.
 - `deleteStoreData` — delete one key from launcher settings
 - `save-settings` — persist the settings screen
 - `get-api-urls` — report which backend URLs this build uses
+- `get-anonymous-id` — read (or create once) the launcher's random install id, a UUID
+  tied to nothing about you. It goes with server-list and update requests so the backend
+  can count active launchers.
 - `showOpenDialog` — open the OS folder picker so you can choose your DayZ folder
 - `get-auto-start` / `set-auto-start` — launch on login
 - `set-close-to-tray` / `set-minimize-to-tray` — window behaviour

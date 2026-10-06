@@ -106,7 +106,73 @@ if (dsn) {
     // Screenshots are opt-in upstream and stay off: this is a game launcher, so a
     // frame could contain a username, a server IP, or whatever else is on screen.
     attachScreenshot: false,
+
+    // Off by default in the SDK, set explicitly because this file is published: no
+    // IP address, no cookies, no request headers are attached to an event.
+    sendDefaultPii: false,
+
+    // The Node SDK stamps `server_name` from os.hostname(), which on a home PC is
+    // routinely the owner's name ("marc-pc"). A crash report does not need to know
+    // which machine it came from -- the release and the stack decide what to fix.
+    serverName: 'redacted',
+
+    beforeSend: scrubPersonalPaths,
   });
+}
+
+/**
+ * Removes the account name from every path in an outgoing event.
+ *
+ * <p>A packaged launcher lives under the user's profile, so stack frames read
+ * `C:\\Users\\Marc\\AppData\\Local\\Programs\\...`. That name is the person's, it
+ * arrives without them ever typing it, and none of it helps fix a crash: the frame is
+ * just as useful as `C:\\Users\\<user>\\...`.
+ *
+ * <p>Applied to the whole event rather than to stack frames alone, because the same
+ * path turns up in exception messages, breadcrumbs and log lines.
+ */
+function scrubPersonalPaths<T>(event: T): T {
+  const HOME_DIRECTORIES = [
+    /([A-Za-z]:[\\/]+Users[\\/]+)[^\\/"']+/gi,  // Windows
+    /(\/Users\/)[^/"']+/g,                     // macOS
+    /(\/home\/)[^/"']+/g,                      // Linux
+  ];
+
+  // Objects already visited on this walk. A circular reference — an error with a
+  // `cause` chain that loops, a context object holding its own parent — would
+  // otherwise recurse until the stack overflows, and the catch below turns any throw
+  // into a dropped report. Losing the whole crash to a cycle is worse than leaving
+  // one already-scrubbed branch unvisited.
+  const seen = new WeakSet<object>();
+
+  const scrub = (value: unknown): unknown => {
+    if (typeof value === 'string') {
+      return HOME_DIRECTORIES.reduce((text, pattern) => text.replace(pattern, '$1<user>'), value);
+    }
+    if (value && typeof value === 'object') {
+      if (seen.has(value)) {
+        return value;
+      }
+      seen.add(value);
+    }
+    if (Array.isArray(value)) {
+      return value.map(scrub);
+    }
+    if (value && typeof value === 'object') {
+      for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+        (value as Record<string, unknown>)[key] = scrub(nested);
+      }
+    }
+    return value;
+  };
+
+  try {
+    return scrub(event) as T;
+  } catch {
+    // A crash report is never worth a crash. Drop the event rather than send one
+    // that was not scrubbed.
+    return null as T;
+  }
 }
 
 /**

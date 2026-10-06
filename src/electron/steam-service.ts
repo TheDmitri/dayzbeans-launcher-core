@@ -2,7 +2,27 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { app, shell } from 'electron';
 import { detectSteamInstallation } from './platform-utils';
+import { e2eHooks } from './e2e-hooks';
 import { logToFile } from './logger';
+import {
+  acknowledgeTimestamp,
+  acknowledgedTimestamp,
+  lastWorkshopTimestamp,
+  noteDownloadRequested,
+  noteWorkshopTimestamp,
+  observeState,
+  setAcknowledgementStore,
+  setMetadataOnlyGraceMs,
+} from './mod-update-tracker';
+import { queryWorkshopItems, type WorkshopItemSummary } from './workshop-items';
+import Store from 'electron-store';
+
+// Metadata-only workshop edits survive restarts, so the startup sweep does not chase
+// them again on every launch (see mod-update-tracker).
+setAcknowledgementStore(new Store() as unknown as Parameters<typeof setAcknowledgementStore>[0]);
+if (e2eHooks?.timing.metadataOnlyGraceMs !== undefined) {
+  setMetadataOnlyGraceMs(e2eHooks.timing.metadataOnlyGraceMs);
+}
 import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 
@@ -13,7 +33,8 @@ let steamworks: any = null;
 let steamClient: any = null;
 const useSteam = process.env['STEAM_ENABLED'] !== 'false';
 
-export const DAYZ_APP_ID = '221100';
+export { DAYZ_APP_ID } from './dayz-install-locator';
+import { DAYZ_APP_ID } from './dayz-install-locator';
 
 /** Which step of initialization failed — drives the diagnostics the user can read. */
 export type SteamInitStage = 'disabled' | 'native-module' | 'appid-file' | 'steam-api';
@@ -92,7 +113,9 @@ export function initializeSteam(quiet = false): boolean {
   initAttempts++;
 
   try {
-    steamworks = require('steamworks.js');
+    // The e2e suite swaps in a scripted Steam workshop (see e2e-hooks.ts); every
+    // Steam call in the app goes through the client this returns.
+    steamworks = e2eHooks?.fakes.steamworks ?? require('steamworks.js');
   } catch (error) {
     // The native .node is asar-unpacked, so it sits loose on disk where antivirus
     // can quarantine it. Distinguished from an API failure because the fix is
@@ -598,7 +621,7 @@ export async function subscribeToItem(publishedFileId: string): Promise<any> {
   try {
     const itemId = BigInt(publishedFileId);
     await steamClient.workshop.subscribe(itemId);
-    const downloadStarted = steamClient.workshop.download(itemId, true);
+    const downloadStarted = requestWorkshopDownload(itemId, true);
     console.log(`📥 [steamworks.js] Subscribe + download triggered for ${publishedFileId}`);
     return { success: true, downloadStarted, method: 'steamworks' };
   } catch (error) {
@@ -801,6 +824,249 @@ export async function isModInstalled(publishedFileId: string): Promise<any> {
   return { success: false, error: 'Max retries exceeded' };
 }
 
+// =============================================================================
+// Mod freshness
+// =============================================================================
+
+/** ISteamUGC EItemState bits, named so call sites stop open-coding `state & 8`. */
+export const ITEM_STATE = {
+  SUBSCRIBED: 1,
+  LEGACY_ITEM: 2,
+  INSTALLED: 4,
+  NEEDS_UPDATE: 8,
+  DOWNLOADING: 16,
+  DOWNLOAD_PENDING: 32,
+} as const;
+
+export type ModUpdateReason =
+  | 'up-to-date'
+  | 'not-installed'
+  | 'folder-missing'
+  | 'steam-flag'
+  | 'timestamp'
+  | 'metadata-only'
+  | 'downloading'
+  | 'steam-unavailable'
+  | 'error';
+
+export interface ModUpdateStatus {
+  success: boolean;
+  workshopId: string;
+  itemState: number;
+  /** Steam says installed AND the folder is on disk. */
+  isInstalled: boolean;
+  /** Installed, but the copy on disk is older than the workshop's. */
+  needsUpdate: boolean;
+  isDownloading: boolean;
+  /** THE launch gate: installed, not stale, nothing in flight. */
+  isUpToDate: boolean;
+  folder: string | null;
+  localTimestamp: number;
+  workshopTimestamp: number;
+  /**
+   * Newest workshop version known to need no download (a metadata-only edit, see
+   * mod-update-tracker), or 0. Waits that expect the install timestamp to reach a
+   * version must accept this one as reaching it.
+   */
+  acknowledgedTimestamp: number;
+  reason: ModUpdateReason;
+  error?: string;
+}
+
+/**
+ * Ask Steam to download a workshop item, and record the request so a download Steam
+ * never starts (a metadata-only edit) can be recognised instead of waited on forever.
+ * Every download request goes through here.
+ */
+export function requestWorkshopDownload(workshopId: bigint, highPriority: boolean): boolean {
+  noteDownloadRequested(workshopId.toString());
+  return getSteamClient().workshop.download(workshopId, highPriority);
+}
+
+/**
+ * The one place that decides whether a mod on disk is the version the workshop has.
+ *
+ * Two independent signals, because neither is sufficient alone:
+ *
+ * 1. `EItemState.NeedsUpdate` (bit 8). Authoritative when set, but it is only set once
+ *    the Steam client has itself noticed the update. A client that started moments ago,
+ *    or one that has not refreshed its UGC state, reports 0 for a mod that is months
+ *    stale. Every check in the join path used to rely on this bit alone, which is why a
+ *    player could update a mod and still be rejected by the server.
+ *
+ * 2. Install timestamp vs the workshop's `timeUpdated`. Survives a cold Steam client,
+ *    costs one UGC query. Pass `queryWorkshop: false` in a tight polling loop where the
+ *    flags are enough and the query would run every tick, or `workshopItem` when a
+ *    batched query already fetched it (see getModUpdateStatuses).
+ *
+ * `isUpToDate` is deliberately conservative: anything in flight, any missing folder, any
+ * failure to ask Steam all answer false. Callers gate the launch on it, and launching a
+ * stale mod costs the player a rejected connection, while a false negative costs a wait.
+ */
+export async function getModUpdateStatus(
+  publishedFileId: string,
+  options: { queryWorkshop?: boolean; workshopItem?: WorkshopItemSummary } = {}
+): Promise<ModUpdateStatus> {
+  const queryWorkshop = options.queryWorkshop !== false;
+
+  const base: ModUpdateStatus = {
+    success: false,
+    workshopId: publishedFileId,
+    itemState: 0,
+    isInstalled: false,
+    needsUpdate: false,
+    isDownloading: false,
+    isUpToDate: false,
+    folder: null,
+    localTimestamp: 0,
+    workshopTimestamp: 0,
+    acknowledgedTimestamp: 0,
+    reason: 'steam-unavailable',
+  };
+
+  if (!steamClient) {
+    return { ...base, error: 'Steam not initialized' };
+  }
+
+  try {
+    const itemId = BigInt(publishedFileId);
+    const itemState: number = steamClient.workshop.state(itemId) || 0;
+    const isDownloading = !!(itemState & (ITEM_STATE.DOWNLOADING | ITEM_STATE.DOWNLOAD_PENDING));
+    const stateInstalled = !!(itemState & ITEM_STATE.INSTALLED);
+
+    let folder: string | null = null;
+    let localTimestamp = 0;
+
+    if (stateInstalled) {
+      try {
+        const installInfo = steamClient.workshop.installInfo(itemId);
+        if (installInfo?.folder) {
+          folder = installInfo.folder;
+          localTimestamp = Number(installInfo.timestamp) || 0;
+        }
+      } catch (error) {
+        console.warn(`Could not read install info for ${publishedFileId}:`, (error as Error).message);
+      }
+    }
+
+    const folderExists = !!folder && fs.existsSync(folder);
+    const isInstalled = stateInstalled && folderExists;
+
+    if (!isInstalled) {
+      return {
+        ...base,
+        success: true,
+        itemState,
+        isDownloading,
+        folder,
+        localTimestamp,
+        reason: stateInstalled ? 'folder-missing' : 'not-installed',
+      };
+    }
+
+    let needsUpdate = !!(itemState & ITEM_STATE.NEEDS_UPDATE);
+    let reason: ModUpdateReason = needsUpdate ? 'steam-flag' : 'up-to-date';
+    let workshopTimestamp = 0;
+
+    // Steam was asked for this item and never showed any activity: the workshop edit
+    // that flagged it changed no files. Remember that version so it stops being flagged.
+    const metadataOnly = observeState(publishedFileId, {
+      isInstalled,
+      isDownloading,
+      needsUpdateFlag: needsUpdate,
+    });
+    if (metadataOnly) {
+      const edit = lastWorkshopTimestamp(publishedFileId);
+      acknowledgeTimestamp(publishedFileId, edit);
+      reason = 'metadata-only';
+      console.log(`ℹ️ ${publishedFileId}: Steam had nothing to download for workshop version ${edit} (metadata-only edit)`);
+    }
+    let acknowledged = acknowledgedTimestamp(publishedFileId);
+
+    if (!needsUpdate && queryWorkshop) {
+      try {
+        const details = options.workshopItem ?? await steamClient.workshop.getItem(itemId);
+        workshopTimestamp = Number(details?.timeUpdated) || 0;
+        noteWorkshopTimestamp(publishedFileId, workshopTimestamp);
+        if (metadataOnly && workshopTimestamp > acknowledged) {
+          acknowledgeTimestamp(publishedFileId, workshopTimestamp);
+          acknowledged = workshopTimestamp;
+        }
+
+        const installedVersion = Math.max(localTimestamp, acknowledged);
+        if (workshopTimestamp > 0 && localTimestamp > 0 && workshopTimestamp > installedVersion) {
+          needsUpdate = true;
+          reason = 'timestamp';
+        }
+      } catch (error) {
+        // A failed UGC query is not evidence of staleness — fall back to the state bit.
+        console.warn(`Workshop query failed for ${publishedFileId}:`, (error as Error).message);
+      }
+    }
+
+    if (!needsUpdate && isDownloading) {
+      reason = 'downloading';
+    }
+
+    return {
+      success: true,
+      workshopId: publishedFileId,
+      itemState,
+      isInstalled,
+      needsUpdate,
+      isDownloading,
+      isUpToDate: !needsUpdate && !isDownloading,
+      folder,
+      localTimestamp,
+      workshopTimestamp,
+      acknowledgedTimestamp: acknowledged,
+      reason,
+    };
+  } catch (error) {
+    return { ...base, reason: 'error', error: (error as Error).message };
+  }
+}
+
+/** Convenience wrapper: true only when the copy on disk is safe to launch. */
+export async function isModUpToDate(
+  publishedFileId: string,
+  options: { queryWorkshop?: boolean } = {}
+): Promise<boolean> {
+  return (await getModUpdateStatus(publishedFileId, options)).isUpToDate;
+}
+
+/**
+ * Freshness for many mods, in parallel batches.
+ *
+ * The workshop timestamps come from one batched UGC query per page of mods instead of one
+ * query per mod. Pass `workshopItems` when the caller already ran that query (the sweep
+ * also wants the titles). A mod the batched query did not cover falls back to its own query.
+ */
+export async function getModUpdateStatuses(
+  publishedFileIds: string[],
+  options: { queryWorkshop?: boolean; workshopItems?: Map<string, WorkshopItemSummary> } = {}
+): Promise<ModUpdateStatus[]> {
+  const BATCH_SIZE = 15;
+  const results: ModUpdateStatus[] = [];
+  const { workshopItems: provided, ...statusOptions } = options;
+  const workshopItems = provided
+    ?? (steamClient && options.queryWorkshop !== false ? await fetchWorkshopItems(publishedFileIds) : undefined);
+
+  for (let i = 0; i < publishedFileIds.length; i += BATCH_SIZE) {
+    const batch = publishedFileIds.slice(i, i + BATCH_SIZE);
+    results.push(...await Promise.all(batch.map(id =>
+      getModUpdateStatus(id, { ...statusOptions, workshopItem: workshopItems?.get(id) }))));
+  }
+
+  return results;
+}
+
+/** Titles and timestamps for many workshop items, one UGC query per page (see workshop-items). */
+export async function fetchWorkshopItems(publishedFileIds: string[]): Promise<Map<string, WorkshopItemSummary>> {
+  if (!steamClient) return new Map();
+  return queryWorkshopItems(ids => steamClient.workshop.getItems(ids), publishedFileIds);
+}
+
 /**
  * Forces a download to start/resume for a workshop item
  * Useful when Steam has paused or not started the download
@@ -814,7 +1080,7 @@ export async function forceDownloadItem(publishedFileId: string): Promise<any> {
     const itemId = BigInt(publishedFileId);
     
     // Call download with high priority to force it to start/resume
-    const result = steamClient.workshop.download(itemId, true);
+    const result = requestWorkshopDownload(itemId, true);
     console.log(`🔄 Force download triggered for ${publishedFileId}, result: ${result}`);
     
     return { success: true, downloadStarted: result };

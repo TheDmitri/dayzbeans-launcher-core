@@ -1,9 +1,16 @@
-// FIRST import on purpose: this initializes GlitchTip error reporting for the
+// Test seam for the e2e suite. Inert (and side-effect free) unless DZBL_E2E=1 in an
+// unpackaged build. It has to come before sentry: when active it moves userData, and
+// sentry opens electron-store on import.
+import { e2eHooks } from './e2e-hooks';
+
+// FIRST real import on purpose: this initializes GlitchTip error reporting for the
 // main process on load, so a crash anywhere in the rest of this startup sequence
 // is still reported. Anything imported above it would be outside that coverage.
 import './sentry';
 
 import { app, BrowserWindow, Tray, Menu, nativeImage, Notification, net } from 'electron';
+import { isMusicMuted, onMusicMutedChange, setMusicMuted } from './music-mute';
+import { SPEAKER_MUTED_PNG, SPEAKER_ON_PNG } from './mute-icons';
 import * as path from 'path';
 import * as fs from 'fs';
 import Store from 'electron-store';
@@ -65,11 +72,12 @@ import { registerProtocol, setupProtocolHandling, setProtocolMainWindow } from '
 // Import Discord service
 import { discordService } from './discord-service';
 // Import mod management for background junction pre-warming
-import { preWarmJunctions, cleanupOrphanedLinks } from './mod-management';
+import { preWarmJunctions, cleanupOrphanedLinks, sweepModUpdates } from './mod-management';
 // Import platform utilities
 import { getAppIconName, getTrayIconName, isWindows, logPlatformInfo } from './platform-utils';
 // Import app suspension service
-import { initSuspensionService, manualSuspend, manualResume } from './app-suspension';
+import { initSuspensionService } from './app-suspension';
+import { initDeepSleep, setAppEntryUrl } from './deep-sleep';
 // Shared file logger (userData/app-debug.log)
 import { logToFile, logSessionStart, getLogFilePath } from './logger';
 
@@ -284,6 +292,9 @@ function createWindow(): BrowserWindow {
     },
   });
 
+  // Taskbar mute button: Windows forgets thumbnail buttons whenever the window hides
+  win.on('show', applyThumbarButtons);
+
   // Open DevTools only in development mode
   if (serve && win) {
     win.webContents.openDevTools();
@@ -346,12 +357,18 @@ function createWindow(): BrowserWindow {
   // Show loading screen first
   // In dev, __dirname is dist-electron/electron/ but loading.html is copied to dist-electron/
   const loadingPath = path.join(__dirname, '..', 'loading.html');
-  const loadingUrl = `file://${path.resolve(loadingPath).replace(/\\/g, '/')}`;
+  // The splash plays the intro itself, before the renderer and its settings exist, so it
+  // gets them in the URL from what the renderer last saved (on by default, at 50%). Off
+  // in e2e runs.
+  const introOn = !e2eHooks && !isMusicMuted() && store.get('settings.musicIntro', true) !== false;
+  const introVolume = Math.min(1, Math.max(0, Number(store.get('settings.musicVolume', 0.5)) || 0));
+  const loadingUrl = `file://${path.resolve(loadingPath).replace(/\\/g, '/')}`
+    + `?music=${introOn ? 1 : 0}&volume=${introVolume}`;
   logToFile(`Loading splash screen from: ${loadingUrl}`);
   
   if (win) {
     // Splash timing: 8 seconds for spotlight, 5 seconds for default
-    let splashMinDisplayMs = 5000;
+    let splashMinDisplayMs = e2eHooks?.timing.splashMs ?? 5000;
 
     // Wait for loading screen to be ready, then try to inject spotlight
     win.webContents.once('did-finish-load', async () => {
@@ -361,7 +378,7 @@ function createWindow(): BrowserWindow {
 
       // Fetch spotlight data and inject into loading screen (non-blocking)
       try {
-        const spotlight = await fetchSpotlight();
+        const spotlight = e2eHooks ? null : await fetchSpotlight();
         if (spotlight && spotlight.bannerUrl && win) {
           logToFile(`Spotlight active: ${spotlight.serverName}`);
           splashMinDisplayMs = 6000; // Give spotlight more screen time
@@ -391,6 +408,11 @@ function createWindow(): BrowserWindow {
             }
           }
         } catch (_) { /* ignore */ }
+        // Loading the app replaces the splash page: fade its intro out first rather than
+        // cutting it mid-chord.
+        const faded = await win?.webContents.executeJavaScript('window.fadeOutIntro ? window.fadeOutIntro() : 0')
+          .catch(() => 0);
+        if (faded) await new Promise(resolve => setTimeout(resolve, Number(faded)));
         loadAngularApp();
       }, splashMinDisplayMs);
     });
@@ -424,8 +446,13 @@ function createWindow(): BrowserWindow {
         }, 1000);
       });
 
-      if (serve) {
+      if (e2eHooks?.rendererUrl) {
+        logToFile(`[e2e] Loading renderer from ${e2eHooks.rendererUrl}`);
+        setAppEntryUrl(e2eHooks.rendererUrl);
+        currentWindow.loadURL(e2eHooks.rendererUrl);
+      } else if (serve) {
         logToFile('Loading dev server: http://localhost:4200');
+        setAppEntryUrl('http://localhost:4200');
         currentWindow.loadURL('http://localhost:4200');
       } else {
         // Path when running electron executable
@@ -446,6 +473,7 @@ function createWindow(): BrowserWindow {
         logToFile(`Full path: ${fullPath}`);
         logToFile(`Path exists: ${fs.existsSync(fullPath)}`);
 
+        setAppEntryUrl(url);
         currentWindow.loadURL(url);
       }
     };
@@ -527,6 +555,9 @@ function createWindow(): BrowserWindow {
     // Initialize app suspension service for resource management
     initSuspensionService(win);
     logToFile('✅ App suspension service initialized');
+
+    // Unload the renderer while DayZ runs and the launcher is out of sight
+    initDeepSleep(win, () => import('./platform-utils').then(m => m.isDayZRunning()));
   }
 
   return win;
@@ -574,27 +605,8 @@ function createTray(): void {
     tray = new Tray(iconPath);
     console.log('✅ Tray object created successfully');
     
-    const contextMenu = Menu.buildFromTemplate([
-      {
-        label: 'Show DayZ Beans Launcher',
-        click: () => {
-          logToFile('Tray: Show window clicked');
-          showWindow();
-        }
-      },
-      { type: 'separator' },
-      {
-        label: 'Exit',
-        click: () => {
-          logToFile('Tray: Exit clicked');
-          (app as any).isQuitting = true;
-          app.quit();
-        }
-      }
-    ]);
-    
     tray.setToolTip('DayZ Beans Launcher');
-    tray.setContextMenu(contextMenu);
+    tray.setContextMenu(buildTrayMenu());
     
     // Double click to show window
     tray.on('double-click', () => {
@@ -607,6 +619,58 @@ function createTray(): void {
     logToFile(`❌ Failed to create tray: ${error}`);
   }
 }
+
+function buildTrayMenu(): Menu {
+  return Menu.buildFromTemplate([
+    {
+      label: 'Show DayZ Beans Launcher',
+      click: () => {
+        logToFile('Tray: Show window clicked');
+        showWindow();
+      }
+    },
+    {
+      label: 'Mute music',
+      type: 'checkbox',
+      checked: isMusicMuted(),
+      click: item => setMusicMuted(item.checked, 'main')
+    },
+    { type: 'separator' },
+    {
+      label: 'Exit',
+      click: () => {
+        logToFile('Tray: Exit clicked');
+        (app as any).isQuitting = true;
+        app.quit();
+      }
+    }
+  ]);
+}
+
+/**
+ * The mute button on the launcher's Windows taskbar thumbnail (hover the taskbar icon).
+ * Windows drops thumbnail buttons when the window is hidden, so this is re-applied on
+ * every show. No-op elsewhere: macOS and Linux have no thumbnail toolbar.
+ */
+function applyThumbarButtons(): void {
+  if (process.platform !== 'win32' || !win || win.isDestroyed()) return;
+  const muted = isMusicMuted();
+  win.setThumbarButtons([{
+    tooltip: muted ? 'Unmute music' : 'Mute music',
+    icon: nativeImage.createFromDataURL(muted ? SPEAKER_MUTED_PNG : SPEAKER_ON_PNG),
+    click: () => setMusicMuted(!isMusicMuted(), 'main')
+  }]);
+}
+
+// A flip from any side refreshes the taskbar button and tray check; a flip from the
+// main process (taskbar, tray) is also pushed to the renderer, which owns the music.
+onMusicMutedChange((muted, source) => {
+  applyThumbarButtons();
+  tray?.setContextMenu(buildTrayMenu());
+  if (source === 'main' && win && !win.isDestroyed()) {
+    win.webContents.send('music-mute-changed', muted);
+  }
+});
 
 // Show window from tray
 function showWindow(): void {
@@ -870,12 +934,16 @@ try {
           
           // Set main window reference for protocol handler and register protocol
           setProtocolMainWindow(win);
-          registerProtocol();
+          // Under e2e the OS handler is not touched: registering would repoint the
+          // developer's real dayzbeans:// links at a test instance.
+          if (!e2eHooks) {
+            registerProtocol();
+          }
           logToFile('Protocol handler initialized');
           
-          // Initialize Discord Rich Presence
+          // Initialize Discord Rich Presence (not under e2e: it would talk to a real Discord)
           logToFile('🎮 Initializing Discord Rich Presence...');
-          discordService.connect().then(connected => {
+          (e2eHooks ? Promise.resolve(false) : discordService.connect()).then(connected => {
             if (connected) {
               logToFile('✅ Discord Rich Presence initialized');
             } else {
@@ -886,7 +954,7 @@ try {
           });
           
           // Check for updates on startup if enabled
-          if (checkUpdatesOnStartup) {
+          if (checkUpdatesOnStartup && !e2eHooks) {
             logToFile('Checking for updates on startup...');
             checkForUpdatesOnStartup(true).catch(error => {
               logToFile(`Startup update check failed: ${error}`);
@@ -906,6 +974,21 @@ try {
               await preWarmJunctions();
             } catch (error) {
               logToFile(`Junction pre-warming failed: ${error}`);
+            }
+            // Then check every subscribed mod for updates and see them through. Runs
+            // last: it is the longest task and the only one that touches the network.
+            // Deliberately not awaited by anything — it reports to the renderer over
+            // `mod-update-sweep` and stands aside if the player starts a join.
+            //
+            // Unconditional, and only ever downloads updates for mods the player already
+            // has installed. A stale mod is not a preference: it is a server join that
+            // fails with a message the player cannot act on.
+            try {
+              logToFile('🔄 Starting background mod update sweep...');
+              const result = await sweepModUpdates();
+              logToFile(`Mod update sweep: checked ${result.checked}, stale ${result.stale}, updated ${result.completed}, pending ${result.stillPending}`);
+            } catch (error) {
+              logToFile(`Mod update sweep failed: ${error}`);
             }
           }, 3000); // Wait 3 seconds after startup to avoid competing with other init tasks
           
